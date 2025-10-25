@@ -1,0 +1,6 @@
+# No external dependencies needed for Sprint 1!
+# We're building from scratch with Python standard library only
+
+# For testing (optional, add in Sprint 2)
+# pytest==7.4.0
+# pytest-cov==4.1.0
