@@ -22,6 +22,7 @@ class TokenType(Enum):
     DROP = auto()
     TABLE = auto()
     INDEX = auto()
+    USING = auto()  # For CREATE INDEX ... USING
     
     # DML Keywords
     SELECT = auto()
@@ -138,6 +139,7 @@ KEYWORDS = {
     'DROP': TokenType.DROP,
     'TABLE': TokenType.TABLE,
     'INDEX': TokenType.INDEX,
+    'USING': TokenType.USING,
     'SELECT': TokenType.SELECT,
     'INSERT': TokenType.INSERT,
     'UPDATE': TokenType.UPDATE,

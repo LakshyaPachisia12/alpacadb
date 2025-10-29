@@ -242,11 +242,27 @@ Examples:
 
         # DDL: CREATE INDEX
         elif isinstance(ast, CreateIndexNode):
+            success = self.catalog.create_index(
+                ast.index_name,
+                ast.table_name,
+                ast.column_name
+            )
             return {
-                "type": "CREATE_INDEX",
-                "success": True,
-                "index": ast.index_name,
-                "note": "Index creation queued (implementation in Sprint 4)",
+                'type': 'CREATE_INDEX',
+                'success': success,
+                'index': ast.index_name,
+                'table': ast.table_name,
+                'column': ast.column_name
+            }
+        
+        # DDL: DROP INDEX
+        elif isinstance(ast, DropIndexNode):
+            success = self.catalog.drop_index(ast.index_name)
+            return {
+                'type': 'DROP_INDEX',
+                'success': success,
+                'index': ast.index_name,
+                'table': ast.table_name
             }
 
         # DML: INSERT
@@ -403,11 +419,19 @@ Examples:
                 print(f"❌ Failed to drop table '{result['table']}'")
 
         # CREATE INDEX
-        elif result_type == "CREATE_INDEX":
-            print(f"✅ Index '{result['index']}' created")
-            if "note" in result:
-                print(f"   Note: {result['note']}")
-
+        elif result_type == 'CREATE_INDEX':
+            if result['success']:
+                print(f"✅ Index '{result['index']}' created on {result['table']}.{result['column']}")
+            else:
+                print(f"❌ Failed to create index '{result['index']}'")
+        
+        # DROP INDEX
+        elif result_type == 'DROP_INDEX':
+            if result['success']:
+                print(f"✅ Index '{result['index']}' dropped")
+            else:
+                print(f"❌ Failed to drop index '{result['index']}'")
+        
         # INSERT
         elif result_type == "INSERT":
             if result["success"]:

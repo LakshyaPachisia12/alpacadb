@@ -76,6 +76,21 @@ class CreateIndexNode(ASTNode):
         return f"CreateIndexNode(index={self.index_name}, table={self.table_name}, column={self.column_name})"
 
 
+@dataclass
+class DropIndexNode(ASTNode):
+    """
+    Represents: DROP INDEX index_name ON table_name
+    
+    Example:
+        DROP INDEX idx_age ON users
+    """
+    index_name: str
+    table_name: str
+    
+    def __repr__(self):
+        return f"DropIndexNode(index={self.index_name}, table={self.table_name})"
+
+
 # ==================== DML Nodes ====================
 
 @dataclass
