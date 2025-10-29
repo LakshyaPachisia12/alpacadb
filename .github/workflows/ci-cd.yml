@@ -1,76 +1,325 @@
-name: CI-CD Pipeline
+# This is your new, robust CI/CD pipeline for AlpacaDB
+# It's faster, more efficient, and safer.
 
+name: AlpacaDB CI/CD Pipeline
+
+# This trigger is perfect. It addresses your concern:
+# - It runs on pushes to 'main', 'storage_engine', and any 'feature/...' branch
+# - It runs on Pull Requests that are trying to merge INTO 'main' or 'storage_engine'
+# This WILL NOT break other feature branches. It will just run this check on them.
 on:
   push:
-    branches: [main, develop]
+    branches: [ main, storage_engine, 'feature/**' ]
   pull_request:
-    branches: [main]
+    branches: [ main, storage_engine ]
 
 jobs:
+  # ====================================================================
+  # JOB 1: BUILD
+  # This job's ONLY purpose is to install dependencies ONCE.
+  # All other jobs will re-use the files from this one.
+  # ====================================================================
   build:
+    name: 📦 Build & Install Dependencies
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout code
+      - name: ⬇️ Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
-          node-version: '18'
-          cache: 'npm'
+          python-version: '3.11'
 
-      - name: Install dependencies
+      - name: 📦 Install Poetry
         run: |
-          if [ -f package.json ]; then
-            npm ci
-          else
-            echo "No package.json found, skipping npm install"
-          fi
+          pip install poetry
+          poetry config virtualenvs.in-project true
 
-      - name: Run linting
+      - name: 🔎 Resolve and install dependencies with Poetry
         run: |
-          if [ -f package.json ] && npm list --depth=0 | grep -q eslint; then
-            npm run lint
-          else
-            echo "No linting configured, skipping..."
-          fi
+          poetry install --no-root
+          
+      - name: ⬆️ Upload Virtual Environment
+        uses: actions/upload-artifact@v4
+        with:
+          name: venv
+          path: .venv/
 
-      - name: Run tests
-        run: |
-          if [ -f package.json ] && npm list --depth=0 | grep -q jest; then
-            npm test
-          else
-            echo "No tests configured, skipping..."
-          fi
-
-      - name: Build application
-        run: |
-          if [ -f package.json ]; then
-            npm run build --if-present
-          else
-            echo "No build script found, skipping..."
-          fi
-
-      - name: Security audit
-        run: |
-          if [ -f package.json ]; then
-            npm audit --audit-level=high
-          else
-            echo "No package.json found, skipping security audit"
-          fi
-
-  deploy:
-    needs: build
+  # ====================================================================
+  # JOB 2: TEST
+  # This job runs in parallel with lint, coverage, and security.
+  # It downloads the venv from 'build' and runs tests.
+  # ====================================================================
+  test:
+    name: 🧪 Run Unit & Integration Tests
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    needs: build # This job won't start until 'build' is done
     
     steps:
-      - name: Deploy to staging
-        run: echo "Deploying to staging environment..."
-        
-      - name: Run integration tests
-        run: echo "Running integration tests..."
-        
-      - name: Deploy to production
-        run: echo "Deploying to production environment..."
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: ⬇️ Download Virtual Environment
+        uses: actions/download-artifact@v4
+        with:
+          name: venv
+          path: .venv/
+
+      - name: 🔧 Fix venv permissions
+        run: chmod -R +x .venv/bin/
+          
+      - name: 🧪 Run tests
+        run: |
+          # Activate the virtual environment
+          source .venv/bin/activate
+          # Run pytest
+          pytest tests/ -v --tb=short
+
+      - name: 📈 Test results summary
+        if: always() # This step runs even if the tests fail
+        run: |
+          echo "✅ Test execution completed"
+
+  # ====================================================================
+  # JOB 3: COVERAGE
+  # Runs in parallel. Downloads the venv.
+  # ====================================================================
+  coverage:
+    name: 📊 Code Coverage Analysis
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: ⬇️ Download Virtual Environment
+        uses: actions/download-artifact@v4
+        with:
+          name: venv
+          path: .venv/
+
+      - name: 🔧 Fix venv permissions
+        run: chmod -R +x .venv/bin/
+
+      - name: 📊 Generate coverage report
+        run: |
+          source .venv/bin/activate
+          pytest tests/ --cov=src --cov-report=html --cov-report=json:coverage.json
+
+      - name: 📉 Check coverage threshold
+        run: |
+          # This is the same smart logic from your file
+          coverage_percent=$(python -c "import json; data=json.load(open('coverage.json')); print(f\"{data['totals']['percent_covered']:.2f}\")")
+          echo "📊 Coverage: $coverage_percent%"
+          
+          if (( $(echo "$coverage_percent < 75" | bc -l) )); then
+            echo "⚠️ Coverage $coverage_percent% is below 75% threshold"
+            echo "This is acceptable for Sprint 2, but aim for 75%+ by final evaluation"
+          else
+            echo "✅ Coverage meets 75% threshold"
+          fi
+
+      - name: ⬆️ Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: htmlcov/
+          retention-days: 30
+
+  # ====================================================================
+  # JOB 4: LINT
+  # Runs in parallel. Downloads the venv.
+  # ====================================================================
+  lint:
+    name: 🧹 Static Code Analysis (Pylint)
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: ⬇️ Download Virtual Environment
+        uses: actions/download-artifact@v4
+        with:
+          name: venv
+          path: .venv/
+
+      - name: 🔧 Fix venv permissions
+        run: chmod -R +x .venv/bin/
+          
+      - name: 🧹 Run pylint
+        run: |
+          source .venv/bin/activate
+          # We send the output to a file AND to the console (with `tee`)
+          # `|| true` means this step won't fail the build, letting the next step decide
+          pylint src/ --output-format=text --reports=yes --score=yes | tee lint-report.txt || true
+
+      - name: 📉 Check lint score
+        run: |
+          # This is the same smart logic from your file
+          if grep -q "Your code has been rated at" lint-report.txt; then
+            score=$(grep "Your code has been rated at" lint-report.txt | grep -oP '\d+\.\d+' | head -1)
+            echo "📊 Pylint score: $score/10"
+            
+            if (( $(echo "$score < 7.5" | bc -l) )); then
+              echo "⚠️ Lint score $score is below 7.5 threshold"
+              echo "This is acceptable for Sprint 2, but aim for 7.5+ by final evaluation"
+            else
+              echo "✅ Lint score meets threshold"
+            fi
+          else
+            echo "⚠️ Could not extract pylint score"
+          fi
+
+      - name: ⬆️ Upload lint report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lint-report
+          path: lint-report.txt
+          retention-days: 30
+
+  # ====================================================================
+  # JOB 5: SECURITY
+  # Runs in parallel. Downloads the venv.
+  # ====================================================================
+  security:
+    name: 🔒 Security Vulnerability Scan
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: ⬇️ Download Virtual Environment
+        uses: actions/download-artifact@v4
+        with:
+          name: venv
+          path: .venv/
+
+      - name: 🔧 Fix venv permissions
+        run: chmod -R +x .venv/bin/
+
+      - name: 🔒 Run security scan
+        run: |
+          source .venv/bin/activate
+          # Run bandit and save JSON report, `|| true` so it doesn't fail
+          bandit -r src/ -f json -o security-report.json || true
+          # Run bandit again to print text output to the console
+          bandit -r src/ -f txt
+
+      - name: 📉 Check for critical vulnerabilities
+        run: |
+          # This is the same smart logic from your file
+          if [ -f security-report.json ]; then
+            critical=$(python -c "import json; data=json.load(open('security-report.json')); print(len([r for r in data.get('results', []) if r.get('issue_severity') == 'HIGH']))" 2>/dev/null || echo "0")
+            echo "🔒 Critical vulnerabilities found: $critical"
+            
+            if [ "$critical" -gt "0" ]; then
+              echo "⚠️ Critical security issues detected"
+              echo "Review security-report.json for details"
+            else
+              echo "✅ No critical vulnerabilities found"
+            fi
+          else
+            echo "✅ Security scan completed"
+          fi
+
+      - name: ⬆️ Upload security report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-report
+          path: security-report.json
+          retention-days: 30
+
+  # ====================================================================
+  # JOB 6: DEPLOY
+  # This job only runs if ALL the checks above pass AND
+  # we are merging into 'main' or 'storage_engine'.
+  # ====================================================================
+  deploy:
+    name: 📦 Create Deployment Artifact
+    runs-on: ubuntu-latest
+    # This job needs ALL previous jobs to pass
+    needs: [test, coverage, lint, security]
+    # This 'if' check is your safety gate. It only runs on your protected branches.
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/storage_engine'
+    
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+          
+      - name: 📥 Download all reports
+        uses: actions/download-artifact@v4
+        with:
+          path: reports/ # This downloads all artifacts into a 'reports' directory
+
+      - name: 📦 Create deployment package
+        run: |
+          mkdir -p deployment/
+          
+          # Copy source code
+          cp -r src/ deployment/
+          cp -r tests/ deployment/
+          
+          # Copy reports
+          # The artifacts are nested, so we find them
+          mkdir -p deployment/reports/coverage
+          if [ -d reports/coverage-report/htmlcov ]; then
+            cp -r reports/coverage-report/htmlcov/* deployment/reports/coverage/
+          fi
+          if [ -f reports/lint-report/lint-report.txt ]; then
+            cp reports/lint-report/lint-report.txt deployment/reports/
+          fi
+          if [ -f reports/security-report/security-report.json ]; then
+            cp reports/security-report/security-report.json deployment/reports/
+          fi
+          
+          # Copy essential files
+          cp README.md deployment/ 2>/dev/null || echo "README.md not found"
+          cp requirements.txt deployment/ 2>/dev/null || echo "requirements.txt not found"
+          
+          # Create deployment info
+          echo "AlpacaDB Deployment Package" > deployment/DEPLOYMENT_INFO.txt
+          echo "Build Date: $(date)" >> deployment/DEPLOYMENT_INFO.txt
+          echo "Commit: $GITHUB_SHA" >> deployment/DEPLOYMENT_INFO.txt
+          echo "Branch: ${GITHUB_REF#refs/heads/}" >> deployment/DEPLOYMENT_INFO.txt
+          
+          # Create zip
+          cd deployment/
+          zip -r ../alpacadb-deployment-$(date +%Y%m%d-%H%M%S).zip .
+          cd ..
+
+      - name: ⬆️ Upload deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpacadb-deployment-package
+          path: alpacadb-deployment-*.zip
+          retention-days: 90
