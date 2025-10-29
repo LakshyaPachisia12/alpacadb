@@ -2,14 +2,46 @@
 Catalog - The database's memory of its own structure.
 
 Stores table schemas (what tables exist, what columns they have)
-in a special metadata page. This is the "data dictionary" that
+and index information in special metadata pages. This is the "data dictionary" that
 allows the database to interpret raw bytes as meaningful tables.
 """
 
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from .page_manager import PageManager
 from .page import Page, PAGE_TYPE_META
+
+
+class IndexInfo:
+    """
+    Describes an index on a table column.
+    """
+    def __init__(self, index_name: str, table_name: str, column_name: str, 
+                 index_type: str = "B-Tree", root_page_id: Optional[int] = None):
+        self.index_name = index_name
+        self.table_name = table_name
+        self.column_name = column_name
+        self.index_type = index_type
+        self.root_page_id = root_page_id
+
+    def to_dict(self) -> Dict:
+        return {
+            "index_name": self.index_name,
+            "table_name": self.table_name,
+            "column_name": self.column_name,
+            "index_type": self.index_type,
+            "root_page_id": self.root_page_id
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'IndexInfo':
+        return cls(
+            data["index_name"],
+            data["table_name"],
+            data["column_name"],
+            data["index_type"],
+            data["root_page_id"]
+        )
 
 
 class TableSchema:
@@ -75,6 +107,7 @@ class Catalog:
         """
         self.page_manager = page_manager
         self.tables: Dict[str, TableSchema] = {}
+        self.indexes: Dict[str, IndexInfo] = {}  # Track indexes by name
         self._load_catalog()
     
     def _load_catalog(self):
@@ -99,7 +132,12 @@ class Catalog:
                     schema = TableSchema.from_dict(table_data)
                     self.tables[schema.table_name] = schema
                 
-                print(f"📚 Loaded catalog: {len(self.tables)} table(s)")
+                # Load indexes
+                for index_data in catalog_data.get('indexes', []):
+                    index_info = IndexInfo.from_dict(index_data)
+                    self.indexes[index_info.index_name] = index_info
+                
+                print(f"📚 Loaded catalog: {len(self.tables)} table(s), {len(self.indexes)} index(es)")
             except (json.JSONDecodeError, UnicodeDecodeError) as e:
                 print(f"⚠️  Failed to parse catalog: {e}")
         else:
@@ -111,9 +149,10 @@ class Catalog:
         
         This is called after any schema change (CREATE TABLE, etc.)
         """
-        # Serialize all table schemas to JSON
+        # Serialize all table schemas and indexes to JSON
         catalog_data = {
             'tables': [schema.to_dict() for schema in self.tables.values()],
+            'indexes': [index.to_dict() for index in self.indexes.values()],
             'version': '0.1.0'  # For future schema migrations
         }
         
@@ -208,6 +247,80 @@ class Catalog:
         print(f"✅ Table '{table_name}' dropped")
         return True
     
+    # ==================== Index Management ====================
+    
+    def create_index(self, index_name: str, table_name: str, column_name: str) -> bool:
+        """
+        Create an index entry in the catalog.
+        
+        Args:
+            index_name: Name of the index
+            table_name: Name of the table being indexed
+            column_name: Name of the column being indexed
+            
+        Returns:
+            True if successful, False if duplicate or invalid
+        """
+        # Check if index already exists
+        if index_name in self.indexes:
+            print(f"❌ Index '{index_name}' already exists")
+            return False
+        
+        # Check if table exists
+        if table_name not in self.tables:
+            print(f"❌ Table '{table_name}' does not exist")
+            return False
+        
+        # Check if column exists in table
+        table_schema = self.tables[table_name]
+        column_exists = any(col['name'] == column_name for col in table_schema.columns)
+        if not column_exists:
+            print(f"❌ Column '{column_name}' does not exist in table '{table_name}'")
+            return False
+        
+        # Create index info
+        index_info = IndexInfo(
+            index_name=index_name,
+            table_name=table_name,
+            column_name=column_name,
+            index_type="B-Tree",
+            root_page_id=None  # Will be set when B-Tree is actually created
+        )
+        
+        self.indexes[index_name] = index_info
+        self._save_catalog()
+        return True
+    
+    def drop_index(self, index_name: str) -> bool:
+        """
+        Remove an index from the catalog.
+        
+        Args:
+            index_name: Name of index to drop
+            
+        Returns:
+            True if successful, False if index doesn't exist
+        """
+        if index_name not in self.indexes:
+            print(f"❌ Index '{index_name}' does not exist")
+            return False
+        
+        del self.indexes[index_name]
+        self._save_catalog()
+        return True
+    
+    def get_index(self, index_name: str) -> Optional[IndexInfo]:
+        """Get index information by name."""
+        return self.indexes.get(index_name)
+    
+    def get_indexes_for_table(self, table_name: str) -> List[IndexInfo]:
+        """Get all indexes for a specific table."""
+        return [idx for idx in self.indexes.values() if idx.table_name == table_name]
+    
+    def list_indexes(self) -> List[str]:
+        """Get list of all index names."""
+        return list(self.indexes.keys())
+    
     def __repr__(self) -> str:
         """String representation for debugging."""
-        return f"Catalog(tables={list(self.tables.keys())})"
+        return f"Catalog(tables={list(self.tables.keys())}, indexes={list(self.indexes.keys())})"

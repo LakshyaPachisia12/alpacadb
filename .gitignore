@@ -41,4 +41,5 @@ Thumbs.db
 # Testing
 .pytest_cache/
 .coverage
-htmlcov/
+htmlcov/"venv/" 
+v_alpaca/
