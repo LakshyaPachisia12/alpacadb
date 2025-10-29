@@ -497,8 +497,14 @@ Examples:
 
     def _should_use_executor(self, ast: ASTNode) -> bool:
         """Decide whether to use new executor or legacy execution."""
-        # Start with SELECT only to test
-        return isinstance(ast, SelectNode)
+        # Route all main query types to executor
+        return isinstance(ast, (
+            SelectNode,
+            CreateTableNode,
+            InsertNode,
+            UpdateNode,
+            DeleteNode,
+        ))
     
     def _execute_with_executor(self, ast: ASTNode):
         """Execute AST using the new QueryExecutor."""
@@ -520,7 +526,26 @@ Examples:
                     "table": ast.table_name,
                     "rows": 1,
                 }
-            # Add other query types as needed
+            elif isinstance(ast, CreateTableNode):
+                return {
+                    "type": "CREATE_TABLE",
+                    "success": True,
+                    "table": ast.table_name,
+                }
+            elif isinstance(ast, UpdateNode):
+                return {
+                    "type": "UPDATE",
+                    "success": True,
+                    "table": ast.table_name,
+                }
+            elif isinstance(ast, DeleteNode):
+                return {
+                    "type": "DELETE",
+                    "success": True,
+                    "table": ast.table_name,
+                }
+            else:
+                raise ValueError(f"Unsupported AST type: {type(ast).__name__}")
             
         except Exception as e:
             raise Exception(f"Executor error: {e}")

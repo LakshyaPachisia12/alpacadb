@@ -282,17 +282,16 @@ class TableManager:
         Clear all data from a table (used by UPDATE/DELETE).
         Resets the table to an empty state.
         """
-        schema = self.catalog.get_table(table_name)
+        schema = self.catalog.get_table_schema(table_name)
         if not schema:
             raise ValueError(f"Table '{table_name}' does not exist")
 
         # Allocate a fresh empty page for the table
-        first_page_id = self.page_manager.allocate_page()
-        first_page = self.page_manager.read_page(first_page_id)
+        first_page = self.page_manager.allocate_page()
         first_page.records = []
-        first_page.next_page_id = -1
-        self.page_manager.write_page(first_page_id, first_page)
+        first_page.next_page_id = None
+        self.page_manager.write_page(first_page)
 
         # Update catalog with new first page
-        schema.first_page_id = first_page_id
+        schema.first_page_id = first_page.page_id
         self.catalog._save_catalog()

@@ -172,67 +172,38 @@ class QueryExecutor:
         if not table_schema:
             raise ValueError(f"Table '{node.table_name}' does not exist")
 
-        all_column_names = [col.lower() for col in table_schema.columns.keys()]
-
-        # Build scan + filter to find rows to update
-        scan = ScanOperator(
-            table_manager=self.table_manager,
-            table_name=node.table_name,
-            column_names=all_column_names,
-        )
-
-        if node.where_clause:
-            filter_op = FilterOperator(
-                child=scan, predicate=node.where_clause, column_names=all_column_names
-            )
-            operator = filter_op
-        else:
-            operator = scan
-
-        # Execute to get matching rows
-        operator.open()
-        updated_count = 0
-
-        # We need to collect all matching rows first, then update
-        # (can't modify while iterating in current storage implementation)
-        matching_rows = []
-        while True:
-            row = operator.next()
-            if row is None:
-                break
-            matching_rows.append(row)
-
-        operator.close()
-
-        # Now we need to update these rows
-        # This is tricky with current storage - we'd need row IDs
-        # For now, let's do a simple implementation:
-        # Delete all rows and re-insert with updates applied
+        all_column_names = [col['name'].lower() for col in table_schema.columns]
 
         # Get ALL rows first
         all_rows = self.table_manager.select_all(node.table_name)
 
-        # Apply updates to matching rows
-        for i, row in enumerate(all_rows):
-            # Check if this row matches the WHERE clause
-            if node.where_clause:
-                scan_temp = ScanOperator(
-                    self.table_manager, node.table_name, all_column_names
-                )
-                filter_temp = FilterOperator(
-                    child=scan_temp,
-                    predicate=node.where_clause,
-                    column_names=all_column_names,
-                )
-                # Simplified check - just see if row passes filter
-                if filter_temp._evaluate_predicate(row):
+        updated_count = 0
+
+        # Build filter once for efficiency
+        if node.where_clause:
+            scan = ScanOperator(
+                table_manager=self.table_manager,
+                table_name=node.table_name,
+                column_names=all_column_names,
+            )
+            filter_op = FilterOperator(
+                child=scan,
+                predicate=node.where_clause,
+                column_names=all_column_names,
+            )
+
+            # Apply updates to matching rows
+            for row in all_rows:
+                # Check if this row matches the WHERE clause
+                if filter_op._evaluate_predicate(row):
                     # Apply updates
                     for col_name, new_value in node.assignments:
                         col_idx = all_column_names.index(col_name.lower())
                         row[col_idx] = new_value
                     updated_count += 1
-            else:
-                # No WHERE clause - update all rows
+        else:
+            # No WHERE clause - update all rows
+            for row in all_rows:
                 for col_name, new_value in node.assignments:
                     col_idx = all_column_names.index(col_name.lower())
                     row[col_idx] = new_value
@@ -261,7 +232,7 @@ class QueryExecutor:
         if not table_schema:
             raise ValueError(f"Table '{node.table_name}' does not exist")
 
-        all_column_names = [col.lower() for col in table_schema.columns.keys()]
+        all_column_names = [col['name'].lower() for col in table_schema.columns]
 
         # Get all rows
         all_rows = self.table_manager.select_all(node.table_name)
@@ -271,17 +242,18 @@ class QueryExecutor:
         deleted_count = 0
 
         if node.where_clause:
-            # Build filter to identify rows to delete
-            for row in all_rows:
-                scan = ScanOperator(
-                    self.table_manager, node.table_name, all_column_names
-                )
-                filter_op = FilterOperator(
-                    child=scan,
-                    predicate=node.where_clause,
-                    column_names=all_column_names,
-                )
+            # Build filter once for efficiency
+            scan = ScanOperator(
+                self.table_manager, node.table_name, all_column_names
+            )
+            filter_op = FilterOperator(
+                child=scan,
+                predicate=node.where_clause,
+                column_names=all_column_names,
+            )
 
+            # Evaluate predicate on each row
+            for row in all_rows:
                 # If row passes filter, it should be deleted
                 if filter_op._evaluate_predicate(row):
                     deleted_count += 1

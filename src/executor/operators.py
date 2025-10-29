@@ -11,6 +11,33 @@ from typing import List, Optional, Any, Iterator
 from abc import ABC, abstractmethod
 
 
+class ReverseCompare:
+    """
+    Wrapper class for reverse comparison in sorting.
+    Used to handle DESC ordering for non-numeric types.
+    """
+    def __init__(self, value):
+        self.value = value
+    
+    def __lt__(self, other):
+        return self.value > other.value
+    
+    def __le__(self, other):
+        return self.value >= other.value
+    
+    def __gt__(self, other):
+        return self.value < other.value
+    
+    def __ge__(self, other):
+        return self.value <= other.value
+    
+    def __eq__(self, other):
+        return self.value == other.value
+    
+    def __ne__(self, other):
+        return self.value != other.value
+
+
 class PhysicalOperator(ABC):
     """Base class for all physical operators"""
 
@@ -275,29 +302,36 @@ class SortOperator(PhysicalOperator):
         if not self.order_by_columns:
             return rows
 
-        # Build sort key function
+        # Build sort key function with proper DESC handling
         def sort_key(row):
             keys = []
             for col_name, is_desc in self.order_by_columns:
                 col_idx = self.column_names.index(col_name.lower())
                 value = row[col_idx]
+                
                 # Handle None values (put them last)
                 if value is None:
-                    value = float("inf") if not is_desc else float("-inf")
-                keys.append(value)
+                    # For DESC, None should be at the beginning (smallest)
+                    # For ASC, None should be at the end (largest)
+                    value = float("-inf") if is_desc else float("inf")
+                
+                # For DESC columns, negate numeric values or use reverse comparison
+                # We'll use a tuple trick: (is_desc, value) and let Python handle it
+                # For DESC: negate if numeric, otherwise we need custom comparison
+                if is_desc:
+                    # Negate numeric values for DESC ordering
+                    if isinstance(value, (int, float)):
+                        keys.append(-value)
+                    else:
+                        # For strings, we can't negate, so we'll use a wrapper
+                        # that reverses comparison
+                        keys.append(ReverseCompare(value))
+                else:
+                    keys.append(value)
             return keys
 
-        # Sort with reverse handling
-        # We need to handle DESC for individual columns
+        # Sort with the multi-key function
         sorted_rows = sorted(rows, key=sort_key)
-
-        # Handle DESC properly by reversing if needed
-        # (This is simplified - real DBs handle multi-column DESC more elegantly)
-        if (
-            self.order_by_columns and self.order_by_columns[0][1]
-        ):  # First column is DESC
-            sorted_rows.reverse()
-
         return sorted_rows
 
     def next(self) -> Optional[List[Any]]:
