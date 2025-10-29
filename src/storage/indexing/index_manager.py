@@ -38,12 +38,50 @@ class IndexManager:
         btree = BTree(self.page_manager)
         
         # Build index by scanning table
-        table = self.catalog.get_table(table_name)
-        for page_id in table.data_pages:
-            page = self.page_manager.read_page(page_id)
-            for row_id, row in enumerate(page.read_rows()):
-                key = row[column_name]
-                btree.insert(key, (page_id, row_id))
+        table_schema = self.catalog.get_table_schema(table_name)
+        if not table_schema or table_schema.first_page_id is None:
+            # Empty table or doesn't exist - just create empty index
+            index_info = IndexInfo(
+                index_name=index_name,
+                table_name=table_name,
+                column_name=column_name,
+                index_type=index_type,
+                root_page_id=btree.root_page_id
+            )
+            self.catalog.indexes[index_name] = index_info
+            self.catalog._save_catalog()
+            self._btrees[index_name] = btree
+            return
+        
+        # Find column index
+        col_index = None
+        for i, col in enumerate(table_schema.columns):
+            if col['name'] == column_name:
+                col_index = i
+                break
+        
+        if col_index is None:
+            raise ValueError(f"Column '{column_name}' not found in table '{table_name}'")
+        
+        # Scan table and build index
+        current_page_id = table_schema.first_page_id
+        while current_page_id is not None:
+            page = self.page_manager.read_page(current_page_id)
+            
+            # Use TableManager to deserialize rows
+            from ..table_manager import TableManager
+            tm = TableManager(self.page_manager, self.catalog)
+            
+            for row_id, record_bytes in enumerate(page.records):
+                try:
+                    row = tm._deserialize_row(table_schema, record_bytes)
+                    key = row[col_index]
+                    btree.insert(key, (current_page_id, row_id))
+                except Exception as e:
+                    print(f"⚠️  Warning: Failed to index row: {e}")
+                    continue
+            
+            current_page_id = page.next_page_id
         
         # Store index metadata
         index_info = IndexInfo(
@@ -53,7 +91,8 @@ class IndexManager:
             index_type=index_type,
             root_page_id=btree.root_page_id
         )
-        self.catalog.add_index(index_info)
+        self.catalog.indexes[index_name] = index_info
+        self.catalog._save_catalog()
         
         # Cache the B-Tree
         self._btrees[index_name] = btree
@@ -81,7 +120,7 @@ class IndexManager:
     def get_btree(self, index_name: str) -> Optional[BTree]:
         """Get a B-Tree index by name."""
         if index_name not in self._btrees:
-            index = self.catalog.get_index_by_name(index_name)
+            index = self.catalog.get_index(index_name)
             if index and index.root_page_id is not None:
                 btree = BTree(self.page_manager)
                 btree.root_page_id = index.root_page_id
@@ -107,6 +146,9 @@ class IndexManager:
                 if btree:
                     key = column_values[index.column_name]
                     btree.insert(key, (page_id, row_id))
+                    # Update root_page_id in case it changed
+                    index.root_page_id = btree.root_page_id
+                    self.catalog._save_catalog()
     
     def delete_entry(self, table_name: str, column_values: Dict[str, Any],
                     page_id: int, row_id: int) -> None:

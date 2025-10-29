@@ -14,6 +14,7 @@ import string
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.storage import PageManager, Catalog, TableManager
+from src.storage.indexing.index_manager import IndexManager
 from src.query import Lexer, Parser
 
 
@@ -26,6 +27,7 @@ class IndexPerformanceTester:
         self.page_manager = None
         self.catalog = None
         self.table_manager = None
+        self.index_manager = None
         
     def setup(self):
         """Set up test database."""
@@ -38,7 +40,8 @@ class IndexPerformanceTester:
         # Create new database
         self.page_manager = PageManager(self.db_path)
         self.catalog = Catalog(self.page_manager)
-        self.table_manager = TableManager(self.page_manager, self.catalog)
+        self.index_manager = IndexManager(self.catalog, self.page_manager)
+        self.table_manager = TableManager(self.page_manager, self.catalog, self.index_manager)
         
         # Create test table
         columns = [
@@ -104,22 +107,55 @@ class IndexPerformanceTester:
         print("\n🔍 Testing index creation performance...")
         
         start_time = time.time()
-        success = self.catalog.create_index('idx_email', 'users', 'email')
+        self.index_manager.create_index('idx_email', 'users', 'email')
         elapsed = time.time() - start_time
         
-        if success:
-            print(f"✅ Index created in {elapsed:.2f} seconds")
-        else:
-            print(f"❌ Index creation failed")
+        print(f"✅ Index created in {elapsed:.2f} seconds")
         
         return elapsed
+    
+    def fetch_row_by_location(self, table_name: str, page_id: int, row_id: int):
+        """
+        Fetch a single row by its physical location.
+        
+        Args:
+            table_name: Name of the table
+            page_id: Page ID where row is stored
+            row_id: Row ID within the page
+            
+        Returns:
+            Row as list of values, or None if not found
+        """
+        schema = self.catalog.get_table_schema(table_name)
+        if not schema:
+            return None
+            
+        page = self.page_manager.read_page(page_id)
+        if not page or row_id >= len(page.records):
+            return None
+            
+        try:
+            record_bytes = page.records[row_id]
+            row = self.table_manager._deserialize_row(schema, record_bytes)
+            return row
+        except Exception as e:
+            print(f"⚠️  Warning: Failed to fetch row: {e}")
+            return None
     
     def test_query_without_index(self, num_queries=100):
         """Test query performance WITHOUT index (full table scan)."""
         print(f"\n🔍 Testing {num_queries} queries WITHOUT index (baseline)...")
         
         # Drop index if exists
-        self.catalog.drop_index('idx_email')
+        index = self.catalog.get_index('idx_email')
+        if index:
+            # Remove from IndexManager cache
+            if 'idx_email' in self.index_manager._btrees:
+                del self.index_manager._btrees['idx_email']
+            # Remove from catalog
+            if 'idx_email' in self.catalog.indexes:
+                del self.catalog.indexes['idx_email']
+                self.catalog._save_catalog()
         
         # Get column index for 'email' (should be index 2: id=0, name=1, email=2, age=3, city=4)
         email_col_idx = 2
@@ -148,10 +184,7 @@ class IndexPerformanceTester:
         print(f"\n🔍 Testing {num_queries} queries WITH index...")
         
         # Create index
-        self.catalog.create_index('idx_email', 'users', 'email')
-        
-        # Get column index for 'email'
-        email_col_idx = 2
+        self.index_manager.create_index('idx_email', 'users', 'email')
         
         start_time = time.time()
         
@@ -159,12 +192,17 @@ class IndexPerformanceTester:
             # Simulate searching for random email
             test_email = self.generate_random_email()
             
-            # In a full implementation, this would use the index
-            # For now, we're just showing the structure
-            index = self.catalog.get_index('idx_email')
-            rows = self.table_manager.select_all('users')
-            # rows are returned as list of lists: [id, name, email, age, city]
-            matches = [row for row in rows if row[email_col_idx] == test_email]
+            # ✅ USE THE INDEX instead of table scan!
+            result = self.index_manager.search_index('idx_email', test_email)
+            
+            if result:
+                # Index found the key - fetch the actual row
+                page_id, row_id = result
+                row = self.fetch_row_by_location('users', page_id, row_id)
+                matches = [row] if row else []
+            else:
+                # Not found
+                matches = []
         
         elapsed = time.time() - start_time
         avg_query_time = (elapsed / num_queries) * 1000  # in milliseconds
