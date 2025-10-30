@@ -2,10 +2,12 @@
 Query Executor - Main Execution Engine
 
 Converts AST nodes into physical operator trees and executes them.
+Now includes query optimization for automatic index selection.
 """
 
 from typing import List, Any, Optional, Tuple
-from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator
+from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator
+from .optimizer import QueryOptimizer
 from ..query.ast_nodes import (
     SelectNode,
     InsertNode,
@@ -18,11 +20,23 @@ from ..query.ast_nodes import (
 class QueryExecutor:
     """
     Main query executor that converts AST to physical operators and executes them.
+    
+    Now includes intelligent query optimization:
+    - Automatically chooses between table scan and index scan
+    - Uses cost-based decision making
+    - Integrates with IndexManager for index lookups
     """
 
-    def __init__(self, table_manager, catalog):
+    def __init__(self, table_manager, catalog, index_manager=None):
         self.table_manager = table_manager
         self.catalog = catalog
+        self.index_manager = index_manager
+        
+        # Initialize query optimizer if index_manager is available
+        if index_manager:
+            self.optimizer = QueryOptimizer(catalog, index_manager, table_manager)
+        else:
+            self.optimizer = None
 
     def execute(self, ast_node) -> Tuple[List[List[Any]], Optional[List[str]]]:
         """
@@ -47,16 +61,19 @@ class QueryExecutor:
 
     def _execute_select(self, node: SelectNode) -> Tuple[List[List[Any]], List[str]]:
         """
-        Execute a SELECT query by building an operator tree.
+        Execute a SELECT query by building an optimized operator tree.
 
-        Operator tree structure:
+        Operator tree structure (optimized):
             ProjectOperator (SELECT columns)
                 ↓
             SortOperator (ORDER BY) [optional]
                 ↓
-            FilterOperator (WHERE) [optional]
+            FilterOperator (WHERE) [optional] OR IndexScanOperator [if index available]
                 ↓
-            ScanOperator (FROM table)
+            ScanOperator (FROM table) [if no index used]
+        
+        The optimizer decides whether to use IndexScanOperator or ScanOperator+FilterOperator
+        based on available indexes and cost estimation.
         """
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
@@ -68,16 +85,42 @@ class QueryExecutor:
 
         # Build operator tree from bottom up
 
-        # 1. Scan Operator (leaf node)
-        scan = ScanOperator(
-            table_manager=self.table_manager,
-            table_name=node.table_name,
-            column_names=all_column_names,
-        )
+        # OPTIMIZATION: Try to use index if available and beneficial
+        current_operator = None
+        
+        if self.optimizer and node.where_clause:
+            # Check if we can use an index for this query
+            index_info = self.optimizer.can_use_index(node.table_name, node.where_clause)
+            
+            if index_info:
+                index_name, search_key = index_info
+                
+                # Cost-based decision: use index or scan?
+                if self.optimizer.should_use_index(node.table_name, index_name):
+                    # Use index scan (O(log n) lookup)
+                    current_operator = IndexScanOperator(
+                        index_manager=self.index_manager,
+                        table_manager=self.table_manager,
+                        table_name=node.table_name,
+                        index_name=index_name,
+                        search_key=search_key,
+                        column_names=all_column_names,
+                    )
+                    # No need for FilterOperator - index already filtered
+                    # Skip to next step
+                    node.where_clause = None  # Mark as already filtered
+        
+        # If no index was used, fall back to traditional scan + filter
+        if current_operator is None:
+            # 1. Scan Operator (leaf node)
+            scan = ScanOperator(
+                table_manager=self.table_manager,
+                table_name=node.table_name,
+                column_names=all_column_names,
+            )
+            current_operator = scan
 
-        current_operator = scan
-
-        # 2. Filter Operator (WHERE clause)
+        # 2. Filter Operator (WHERE clause) - only if not already handled by index
         if node.where_clause:
             current_operator = FilterOperator(
                 child=current_operator,

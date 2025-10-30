@@ -13,6 +13,7 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.storage import PageManager, Catalog, TableManager
+from src.storage.indexing import IndexManager
 from src.query import Lexer, Parser, LexerError, ParseError
 from src.query.ast_nodes import *
 from src.executor import QueryExecutor
@@ -26,6 +27,7 @@ class AlpacaDBCLI:
         self.db_path = db_path
         self.page_manager: Optional[PageManager] = None
         self.catalog: Optional[Catalog] = None
+        self.index_manager: Optional[IndexManager] = None
         self.table_manager: Optional[TableManager] = None
         self.running = True
         self.executor: Optional[QueryExecutor] = None
@@ -34,13 +36,15 @@ class AlpacaDBCLI:
         self._initialize_database()
 
     def _initialize_database(self):
-        """Initialize or open existing database."""
+        """Initialize or open existing database with index support."""
         try:
             self.page_manager = PageManager(self.db_path)
             self.catalog = Catalog(self.page_manager)
-            self.table_manager = TableManager(self.page_manager, self.catalog)
-            self.executor = QueryExecutor(self.table_manager, self.catalog)
+            self.index_manager = IndexManager(self.catalog, self.page_manager)
+            self.table_manager = TableManager(self.page_manager, self.catalog, self.index_manager)
+            self.executor = QueryExecutor(self.table_manager, self.catalog, self.index_manager)
             print(f"Connected to: {self.db_path}")
+            print(f"Query optimizer: ENABLED")
         except Exception as e:
             print(f"❌ Failed to initialize database: {e}")
             sys.exit(1)

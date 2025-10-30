@@ -103,6 +103,9 @@ class ScanOperator(PhysicalOperator):
         if not self._opened:
             raise RuntimeError("Operator not opened")
 
+        if self._iterator is None:
+            return None
+
         try:
             return next(self._iterator)
         except StopIteration:
@@ -338,6 +341,9 @@ class SortOperator(PhysicalOperator):
         if not self._opened:
             raise RuntimeError("Operator not opened")
 
+        if self._iterator is None:
+            return None
+
         try:
             return next(self._iterator)
         except StopIteration:
@@ -350,3 +356,107 @@ class SortOperator(PhysicalOperator):
 
     def __repr__(self):
         return f"SortOperator(order_by={self.order_by_columns})"
+
+
+class IndexScanOperator(PhysicalOperator):
+    """
+    Index Scan Operator
+    
+    Uses a B-Tree index to directly locate rows matching a specific key value,
+    avoiding expensive full table scans. This provides O(log n) lookup time
+    instead of O(n) for sequential scans.
+    
+    Example: SELECT * FROM users WHERE email = 'alice@example.com'
+    If an index exists on 'email', this operator uses it for fast lookup.
+    """
+
+    def __init__(
+        self,
+        index_manager,
+        table_manager,
+        table_name: str,
+        index_name: str,
+        search_key: Any,
+        column_names: List[str],
+    ):
+        """
+        Args:
+            index_manager: IndexManager for B-Tree lookups
+            table_manager: TableManager for fetching actual row data
+            table_name: Name of the table to scan
+            index_name: Name of the index to use
+            search_key: The key value to search for (e.g., 'alice@example.com')
+            column_names: All column names in the table (for row construction)
+        """
+        super().__init__()
+        self.index_manager = index_manager
+        self.table_manager = table_manager
+        self.table_name = table_name
+        self.index_name = index_name
+        self.search_key = search_key
+        self.column_names = column_names
+        self._result_row = None
+        self._row_returned = False
+
+    def open(self):
+        """Initialize the index scan"""
+        super().open()
+        
+        # Perform index lookup (O(log n) operation)
+        result = self.index_manager.search_index(self.index_name, self.search_key)
+        
+        if result is not None:
+            page_id, row_id = result
+            # Fetch the actual row data from storage
+            self._result_row = self._fetch_row_by_location(page_id, row_id)
+        else:
+            self._result_row = None
+        
+        self._row_returned = False
+
+    def next(self) -> Optional[List[Any]]:
+        """Return the matching row (at most one)"""
+        if not self._opened:
+            raise RuntimeError("Operator not opened")
+        
+        # Index lookups return at most one row (for equality predicates)
+        if not self._row_returned and self._result_row is not None:
+            self._row_returned = True
+            return self._result_row
+        
+        return None
+
+    def _fetch_row_by_location(self, page_id: int, row_id: int) -> Optional[List[Any]]:
+        """
+        Fetch a single row by its physical storage location.
+        
+        Args:
+            page_id: The page ID where the row is stored
+            row_id: The row index within that page
+            
+        Returns:
+            List of column values, or None if not found
+        """
+        schema = self.table_manager.catalog.get_table_schema(self.table_name)
+        if not schema:
+            return None
+        
+        try:
+            page = self.table_manager.page_manager.read_page(page_id)
+            if not page or row_id >= len(page.records):
+                return None
+            
+            record_bytes = page.records[row_id]
+            row = self.table_manager._deserialize_row(schema, record_bytes)
+            return row
+        except Exception:
+            return None
+
+    def close(self):
+        """Clean up resources"""
+        super().close()
+        self._result_row = None
+        self._row_returned = False
+
+    def __repr__(self):
+        return f"IndexScanOperator(table={self.table_name}, index={self.index_name}, key={self.search_key})"

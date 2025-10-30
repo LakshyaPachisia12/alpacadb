@@ -9,7 +9,7 @@ from ..page_manager import PageManager
 from ..page import Page, PAGE_TYPE_INDEX
 
 class BTreeNode:
-    def __init__(self, is_leaf: bool = True, order: int = 4):
+    def __init__(self, is_leaf: bool = True, order: int = 10):
         self.is_leaf = is_leaf
         self.keys: List[Any] = []
         self.children: List[int] = []  # Page IDs of child nodes
@@ -21,7 +21,38 @@ class BTreeNode:
         return len(self.keys) >= (2 * self.order - 1)
 
 class BTree:
-    def __init__(self, page_manager: PageManager, order: int = 4):
+    """
+    B-Tree implementation with configurable order.
+    
+    Order determines the maximum number of children per node:
+    - Max keys per node = 2 × order - 1
+    - Min keys per node = order - 1
+    
+    Optimal order depends on dataset size:
+    - Small datasets (< 10k rows): order = 10
+    - Medium datasets (10k-100k rows): order = 15
+    - Large datasets (100k+ rows): order = 20
+    
+    WARNING: Very large orders (> 30) can hurt performance because
+    searching within each node becomes linear O(n) on large arrays!
+    """
+    
+    def __init__(self, page_manager: PageManager, order: int = 10):
+        """
+        Initialize B-Tree with specified order.
+        
+        Args:
+            page_manager: PageManager for disk I/O
+            order: B-Tree order (default 10, good for most use cases)
+                   Higher orders reduce tree height but increase node search time.
+        """
+        if order < 2:
+            raise ValueError("B-Tree order must be at least 2")
+        if order > 50:
+            # Warn about very large orders
+            print(f"⚠️  Warning: B-Tree order {order} is very large. "
+                  f"This may hurt performance due to linear search within nodes.")
+        
         self.order = order
         self.page_manager = page_manager
         self.root_page_id: Optional[int] = None
@@ -170,6 +201,8 @@ class BTree:
     def _load_node(self, page_id: int) -> BTreeNode:
         """Load a node from disk."""
         page = self.page_manager.read_page(page_id)
+        if page is None:
+            raise RuntimeError(f"Failed to load page {page_id}")
         node = self._deserialize_node(page.records[0])  # Node stored in first record
         node.page_id = page_id
         return node
@@ -181,6 +214,8 @@ class BTree:
         if node.page_id is not None:
             # Update existing page
             page = self.page_manager.read_page(node.page_id)
+            if page is None:
+                raise RuntimeError(f"Failed to load page {node.page_id}")
             page.records = [node_bytes]
             self.page_manager.write_page(page)
             return node.page_id
@@ -269,6 +304,8 @@ class BTree:
                 # Split child first
                 self._split_child(node, i)
                 # Reload node after split
+                if node.page_id is None:
+                    raise RuntimeError("Node page_id is None after split")
                 node = self._load_node(node.page_id)
                 if key > node.keys[i]:
                     i += 1

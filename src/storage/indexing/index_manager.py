@@ -24,18 +24,23 @@ class IndexManager:
         self._btrees: Dict[str, BTree] = {}  # Cache of open B-Trees
         
     def create_index(self, index_name: str, table_name: str, 
-                    column_name: str, index_type: str = "B-Tree") -> None:
+                    column_name: str, index_type: str = "B-Tree", order: Optional[int] = None) -> None:
         """
-        Create a new index on a table column.
+        Create a new index on a table column with optimal B-Tree order.
         
         Args:
             index_name: Name of the new index
             table_name: Name of the table to index
             column_name: Name of the column to index
             index_type: Type of index (currently only B-Tree supported)
+            order: B-Tree order (if None, automatically determined from table size)
         """
-        # Create new B-Tree
-        btree = BTree(self.page_manager)
+        # Determine optimal order if not specified
+        if order is None:
+            order = self._get_optimal_order(table_name)
+        
+        # Create new B-Tree with optimal order
+        btree = BTree(self.page_manager, order=order)
         
         # Build index by scanning table
         table_schema = self.catalog.get_table_schema(table_name)
@@ -72,6 +77,9 @@ class IndexManager:
             from ..table_manager import TableManager
             tm = TableManager(self.page_manager, self.catalog)
             
+            if page is None:
+                break
+            
             for row_id, record_bytes in enumerate(page.records):
                 try:
                     row = tm._deserialize_row(table_schema, record_bytes)
@@ -105,14 +113,14 @@ class IndexManager:
             index_name: Name of the index to drop
             table_name: Name of the table the index is on
         """
-        index = self.catalog.get_index(index_name, table_name)
+        index = self.catalog.get_index(index_name)
         if index:
             # Remove from cache
             if index_name in self._btrees:
                 del self._btrees[index_name]
             
             # Remove from catalog
-            self.catalog.remove_index(index_name, table_name)
+            self.catalog.drop_index(index_name)
             
             # Free B-Tree pages
             self._free_btree_pages(index.root_page_id)
@@ -185,6 +193,65 @@ class IndexManager:
             return btree.search(key)
         return None
     
+    def _get_optimal_order(self, table_name: str) -> int:
+        """
+        Determine optimal B-Tree order based on table size.
+        
+        Uses heuristics:
+        - Small tables (< 10k rows): order = 10
+        - Medium tables (10k-100k rows): order = 15  
+        - Large tables (100k+ rows): order = 20
+        
+        Args:
+            table_name: Name of the table
+            
+        Returns:
+            Optimal B-Tree order
+        """
+        # Estimate row count
+        table_schema = self.catalog.get_table_schema(table_name)
+        if not table_schema or table_schema.first_page_id is None:
+            return 10  # Default for empty table
+        
+        # Quick row count estimation
+        row_count = 0
+        current_page_id = table_schema.first_page_id
+        page_count = 0
+        
+        # Sample first 3 pages
+        while current_page_id is not None and page_count < 3:
+            page = self.page_manager.read_page(current_page_id)
+            if page:
+                row_count += len(page.records)
+                current_page_id = page.next_page_id
+                page_count += 1
+            else:
+                break
+        
+        # Estimate total rows
+        if page_count > 0:
+            # Count remaining pages
+            total_pages = page_count
+            while current_page_id is not None:
+                total_pages += 1
+                page = self.page_manager.read_page(current_page_id)
+                if page:
+                    current_page_id = page.next_page_id
+                else:
+                    break
+            
+            estimated_rows = (row_count // page_count) * total_pages
+            
+            # Choose order based on size
+            if estimated_rows < 10_000:
+                return 10  # Small dataset
+            elif estimated_rows < 100_000:
+                return 15  # Medium dataset
+            else:
+                return 20  # Large dataset
+        
+        return 10  # Default
+    
     def _free_btree_pages(self, root_page_id: Optional[int]) -> None:
         """
         Recursively free all pages in a B-Tree.
@@ -197,12 +264,17 @@ class IndexManager:
             
         # Load the root node
         page = self.page_manager.read_page(root_page_id)
-        node = BTree._deserialize_node(page.read_data())
+        if page is None or not page.records:
+            return
+        
+        # Create a temporary BTree instance to use its deserialize method
+        temp_btree = BTree(self.page_manager, order=10)
+        node = temp_btree._deserialize_node(page.records[0])
         
         # Recursively free child pages
         if not node.is_leaf:
             for child_id in node.children:
                 self._free_btree_pages(child_id)
         
-        # Free this page
-        self.page_manager.free_page(root_page_id)
+        # Note: Actual page freeing would require a free page list implementation
+        # For now, we just break the references in the catalog

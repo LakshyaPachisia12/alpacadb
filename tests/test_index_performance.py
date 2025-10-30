@@ -88,7 +88,8 @@ class IndexPerformanceTester:
                 random.choice(['NYC', 'LA', 'Chicago', 'Houston', 'Phoenix'])  # city
             ]
             
-            self.table_manager.insert_row('users', values)
+            if self.table_manager:
+                self.table_manager.insert_row('users', values)
             
             # Progress indicator
             if (i + 1) % 1000 == 0:
@@ -107,7 +108,8 @@ class IndexPerformanceTester:
         print("\n🔍 Testing index creation performance...")
         
         start_time = time.time()
-        self.index_manager.create_index('idx_email', 'users', 'email')
+        if self.index_manager:
+            self.index_manager.create_index('idx_email', 'users', 'email')
         elapsed = time.time() - start_time
         
         print(f"✅ Index created in {elapsed:.2f} seconds")
@@ -126,16 +128,22 @@ class IndexPerformanceTester:
         Returns:
             Row as list of values, or None if not found
         """
+        if not self.catalog:
+            return None
         schema = self.catalog.get_table_schema(table_name)
         if not schema:
             return None
-            
+        
+        if not self.page_manager:
+            return None
         page = self.page_manager.read_page(page_id)
         if not page or row_id >= len(page.records):
             return None
             
         try:
             record_bytes = page.records[row_id]
+            if not self.table_manager:
+                return None
             row = self.table_manager._deserialize_row(schema, record_bytes)
             return row
         except Exception as e:
@@ -147,6 +155,8 @@ class IndexPerformanceTester:
         print(f"\n🔍 Testing {num_queries} queries WITHOUT index (baseline)...")
         
         # Drop index if exists
+        if not self.catalog or not self.index_manager:
+            return 0.0, 0.0
         index = self.catalog.get_index('idx_email')
         if index:
             # Remove from IndexManager cache
@@ -165,6 +175,8 @@ class IndexPerformanceTester:
         for i in range(num_queries):
             # Simulate searching for random email
             test_email = self.generate_random_email()
+            if not self.table_manager:
+                continue
             rows = self.table_manager.select_all('users')
             
             # Filter manually (simulating WHERE clause without index)
@@ -184,6 +196,8 @@ class IndexPerformanceTester:
         print(f"\n🔍 Testing {num_queries} queries WITH index...")
         
         # Create index
+        if not self.index_manager:
+            return 0.0, 0.0
         self.index_manager.create_index('idx_email', 'users', 'email')
         
         start_time = time.time()
