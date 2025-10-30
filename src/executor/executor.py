@@ -5,14 +5,17 @@ Converts AST nodes into physical operator trees and executes them.
 """
 
 from typing import List, Any, Optional, Tuple
-from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator
+from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator
 from ..query.ast_nodes import (
     SelectNode,
     InsertNode,
     CreateTableNode,
+    CreateIndexNode,
+    DropIndexNode,
     UpdateNode,
     DeleteNode,
 )
+from ..optimizer import QueryOptimizer
 
 
 class QueryExecutor:
@@ -20,9 +23,12 @@ class QueryExecutor:
     Main query executor that converts AST to physical operators and executes them.
     """
 
-    def __init__(self, table_manager, catalog):
+    def __init__(self, table_manager, catalog, index_manager=None):
         self.table_manager = table_manager
         self.catalog = catalog
+        self.index_manager = index_manager
+        self.optimizer = QueryOptimizer(catalog, index_manager) if index_manager else None
+        self.last_plan = None  # For debugging/testing - stores last query plan type
 
     def execute(self, ast_node) -> Tuple[List[List[Any]], Optional[List[str]]]:
         """
@@ -38,6 +44,10 @@ class QueryExecutor:
             return self._execute_insert(ast_node)
         elif isinstance(ast_node, CreateTableNode):
             return self._execute_create_table(ast_node)
+        elif isinstance(ast_node, CreateIndexNode):
+            return self._execute_create_index(ast_node)
+        elif isinstance(ast_node, DropIndexNode):
+            return self._execute_drop_index(ast_node)
         elif isinstance(ast_node, UpdateNode):
             return self._execute_update(ast_node)
         elif isinstance(ast_node, DeleteNode):
@@ -49,14 +59,14 @@ class QueryExecutor:
         """
         Execute a SELECT query by building an operator tree.
 
-        Operator tree structure:
+        Operator tree structure (with optimizer):
             ProjectOperator (SELECT columns)
                 ↓
             SortOperator (ORDER BY) [optional]
                 ↓
-            FilterOperator (WHERE) [optional]
+            FilterOperator (WHERE - remaining predicates) [optional]
                 ↓
-            ScanOperator (FROM table)
+            IndexScanOperator OR ScanOperator (FROM table - chosen by optimizer)
         """
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
@@ -68,16 +78,43 @@ class QueryExecutor:
 
         # Build operator tree from bottom up
 
-        # 1. Scan Operator (leaf node)
-        scan = ScanOperator(
-            table_manager=self.table_manager,
-            table_name=node.table_name,
-            column_names=all_column_names,
-        )
+        # 1. Base Scan Operator (leaf node) - use optimizer if available
+        if self.optimizer:
+            # Ask optimizer for execution plan
+            plan = self.optimizer.optimize(node)
+            self.last_plan = plan.plan_type  # Store for testing/debugging
+            
+            if plan.plan_type == 'IndexScan':
+                # Use IndexScan for point lookup
+                scan = IndexScanOperator(
+                    table_manager=self.table_manager,
+                    index_manager=self.index_manager,
+                    table_name=node.table_name,
+                    index_name=plan.index_name,
+                    key=plan.search_key,
+                    column_names=all_column_names,
+                )
+            else:
+                # Fall back to sequential scan
+                scan = ScanOperator(
+                    table_manager=self.table_manager,
+                    table_name=node.table_name,
+                    column_names=all_column_names,
+                )
+        else:
+            # No optimizer - use sequential scan
+            self.last_plan = 'SeqScan'
+            scan = ScanOperator(
+                table_manager=self.table_manager,
+                table_name=node.table_name,
+                column_names=all_column_names,
+            )
 
         current_operator = scan
 
         # 2. Filter Operator (WHERE clause)
+        # Note: Even with IndexScan, we still apply the full predicate
+        # because the index only handles the equality part
         if node.where_clause:
             current_operator = FilterOperator(
                 child=current_operator,
@@ -166,6 +203,7 @@ class QueryExecutor:
         1. Scan the table with filter (WHERE clause)
         2. For each matching row, update the specified columns
         3. Write back to storage
+        4. Rebuild indexes (since table was rewritten)
         """
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
@@ -214,6 +252,11 @@ class QueryExecutor:
         self.table_manager._clear_table(node.table_name)
         for row in all_rows:
             self.table_manager.insert_row(node.table_name, row)
+        
+        # Rebuild indexes to maintain correctness
+        # TODO: Replace with proper B-Tree delete in Phase 3
+        if self.index_manager:
+            self.index_manager.rebuild_indexes_for_table(node.table_name)
 
         print(f"Updated {updated_count} row(s).")
         return [], None
@@ -226,6 +269,7 @@ class QueryExecutor:
         1. Scan the table with filter (WHERE clause)
         2. Collect rows that DON'T match the condition
         3. Clear table and re-insert non-matching rows
+        4. Rebuild indexes (since table was rewritten)
         """
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
@@ -268,6 +312,27 @@ class QueryExecutor:
         self.table_manager._clear_table(node.table_name)
         for row in rows_to_keep:
             self.table_manager.insert_row(node.table_name, row)
+        
+        # Rebuild indexes to maintain correctness
+        # TODO: Replace with proper B-Tree delete in Phase 3
+        if self.index_manager:
+            self.index_manager.rebuild_indexes_for_table(node.table_name)
 
         print(f"Deleted {deleted_count} row(s).")
+        return [], None
+
+    def _execute_create_index(self, node: CreateIndexNode) -> Tuple[List[List[Any]], None]:
+        """Execute CREATE INDEX statement."""
+        if not self.index_manager:
+            raise ValueError("Index manager not available")
+        
+        self.index_manager.create_index(node.index_name, node.table_name, node.column_name)
+        return [], None
+
+    def _execute_drop_index(self, node: DropIndexNode) -> Tuple[List[List[Any]], None]:
+        """Execute DROP INDEX statement."""
+        if not self.index_manager:
+            raise ValueError("Index manager not available")
+        
+        self.index_manager.drop_index(node.index_name, node.table_name)
         return [], None

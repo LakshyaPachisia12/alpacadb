@@ -13,6 +13,7 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.storage import PageManager, Catalog, TableManager
+from src.storage.indexing.index_manager import IndexManager
 from src.query import Lexer, Parser, LexerError, ParseError
 from src.query.ast_nodes import *
 from src.executor import QueryExecutor
@@ -27,6 +28,7 @@ class AlpacaDBCLI:
         self.page_manager: Optional[PageManager] = None
         self.catalog: Optional[Catalog] = None
         self.table_manager: Optional[TableManager] = None
+        self.index_manager: Optional[IndexManager] = None
         self.running = True
         self.executor: Optional[QueryExecutor] = None
 
@@ -38,8 +40,9 @@ class AlpacaDBCLI:
         try:
             self.page_manager = PageManager(self.db_path)
             self.catalog = Catalog(self.page_manager)
-            self.table_manager = TableManager(self.page_manager, self.catalog)
-            self.executor = QueryExecutor(self.table_manager, self.catalog)
+            self.index_manager = IndexManager(self.catalog, self.page_manager)
+            self.table_manager = TableManager(self.page_manager, self.catalog, self.index_manager)
+            self.executor = QueryExecutor(self.table_manager, self.catalog, self.index_manager)
             print(f"Connected to: {self.db_path}")
         except Exception as e:
             print(f"❌ Failed to initialize database: {e}")
@@ -242,11 +245,21 @@ Examples:
 
         # DDL: CREATE INDEX
         elif isinstance(ast, CreateIndexNode):
-            success = self.catalog.create_index(
-                ast.index_name,
-                ast.table_name,
-                ast.column_name
-            )
+            if self.index_manager:
+                # Use IndexManager for full index creation with B-Tree
+                self.index_manager.create_index(
+                    ast.index_name,
+                    ast.table_name,
+                    ast.column_name
+                )
+                success = True
+            else:
+                # Fallback to catalog-only creation
+                success = self.catalog.create_index(
+                    ast.index_name,
+                    ast.table_name,
+                    ast.column_name
+                )
             return {
                 'type': 'CREATE_INDEX',
                 'success': success,
@@ -257,7 +270,13 @@ Examples:
         
         # DDL: DROP INDEX
         elif isinstance(ast, DropIndexNode):
-            success = self.catalog.drop_index(ast.index_name)
+            if self.index_manager:
+                # Use IndexManager to properly clean up B-Tree
+                self.index_manager.drop_index(ast.index_name, ast.table_name)
+                success = True
+            else:
+                # Fallback to catalog-only drop
+                success = self.catalog.drop_index(ast.index_name)
             return {
                 'type': 'DROP_INDEX',
                 'success': success,

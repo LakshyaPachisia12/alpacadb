@@ -350,3 +350,73 @@ class SortOperator(PhysicalOperator):
 
     def __repr__(self):
         return f"SortOperator(order_by={self.order_by_columns})"
+
+
+class IndexScanOperator(PhysicalOperator):
+    """
+    Index Scan Operator
+    Uses a B-Tree index to find rows matching a key.
+    
+    This operator leverages indexes for point lookups (equality predicates).
+    Much faster than sequential scan for large tables.
+    Handles duplicate keys by returning all matching rows.
+    """
+
+    def __init__(self, table_manager, index_manager, table_name: str, 
+                 index_name: str, key: Any, column_names: List[str]):
+        """
+        Initialize index scan operator.
+        
+        Args:
+            table_manager: TableManager for fetching rows
+            index_manager: IndexManager for index lookups
+            table_name: Name of the table
+            index_name: Name of the index to use
+            key: Value to search for in the index
+            column_names: Column names in order (for consistency with other operators)
+        """
+        super().__init__()
+        self.table_manager = table_manager
+        self.index_manager = index_manager
+        self.table_name = table_name
+        self.index_name = index_name
+        self.key = key
+        self.column_names = column_names
+        self._rows = []
+        self._current_idx = 0
+
+    def open(self):
+        super().open()
+        # Perform index lookup - get ALL matching rows (handles duplicates)
+        results = self.index_manager.search_index_all(self.index_name, self.key)
+        
+        # Fetch all matching rows
+        self._rows = []
+        for page_id, row_id in results:
+            row = self.table_manager.fetch_row_by_location(
+                self.table_name, page_id, row_id
+            )
+            if row:
+                self._rows.append(row)
+        
+        self._current_idx = 0
+
+    def next(self) -> Optional[List[Any]]:
+        if not self._opened:
+            raise RuntimeError("Operator not opened")
+        
+        # Return rows one by one
+        if self._current_idx >= len(self._rows):
+            return None
+        
+        row = self._rows[self._current_idx]
+        self._current_idx += 1
+        return row
+
+    def close(self):
+        super().close()
+        self._rows = []
+        self._current_idx = 0
+
+    def __repr__(self):
+        return f"IndexScanOperator(index={self.index_name}, key={self.key})"
