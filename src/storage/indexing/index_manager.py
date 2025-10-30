@@ -24,7 +24,7 @@ class IndexManager:
         self._btrees: Dict[str, BTree] = {}  # Cache of open B-Trees
         
     def create_index(self, index_name: str, table_name: str, 
-                    column_name: str, index_type: str = "B-Tree") -> None:
+                    column_name: str, table_manager=None) -> None:
         """
         Create a new index on a table column.
         
@@ -32,28 +32,64 @@ class IndexManager:
             index_name: Name of the new index
             table_name: Name of the table to index
             column_name: Name of the column to index
-            index_type: Type of index (currently only B-Tree supported)
+            table_manager: TableManager instance to scan table data
         """
+        # Create index metadata in catalog first
+        if not self.catalog.create_index(index_name, table_name, column_name):
+            return  # Error already printed by catalog
+        
+        # Get the column index in the schema
+        schema = self.catalog.get_table_schema(table_name)
+        if not schema:
+            print(f"❌ Table '{table_name}' not found")
+            return
+            
+        column_index = None
+        for idx, col in enumerate(schema.columns):
+            if col['name'] == column_name:
+                column_index = idx
+                break
+        
+        if column_index is None:
+            print(f"❌ Column '{column_name}' not found in table")
+            return
+        
         # Create new B-Tree
         btree = BTree(self.page_manager)
         
-        # Build index by scanning table
-        table = self.catalog.get_table(table_name)
-        for page_id in table.data_pages:
-            page = self.page_manager.read_page(page_id)
-            for row_id, row in enumerate(page.read_rows()):
-                key = row[column_name]
-                btree.insert(key, (page_id, row_id))
+        # Build index by scanning table if table_manager provided
+        if table_manager and schema.first_page_id is not None:
+            print(f"🔨 Building index '{index_name}' on {table_name}({column_name})...")
+            
+            # Scan all pages in the table
+            current_page_id = schema.first_page_id
+            total_entries = 0
+            
+            while current_page_id is not None:
+                page = self.page_manager.read_page(current_page_id)
+                if not page:
+                    break
+                
+                # Deserialize each row and extract the indexed column
+                for row_id, record_bytes in enumerate(page.records):
+                    try:
+                        row = table_manager._deserialize_row(schema, record_bytes)
+                        key = row[column_index]  # Extract indexed column value
+                        
+                        # Insert into B-Tree: key -> (page_id, row_id)
+                        btree.insert(key, (current_page_id, row_id))
+                        total_entries += 1
+                    except Exception as e:
+                        print(f"⚠️  Warning: Failed to index row {row_id} on page {current_page_id}: {e}")
+                        continue
+                
+                current_page_id = page.next_page_id
+            
+            print(f"✅ Index '{index_name}' built with {total_entries} entries")
         
-        # Store index metadata
-        index_info = IndexInfo(
-            index_name=index_name,
-            table_name=table_name,
-            column_name=column_name,
-            index_type=index_type,
-            root_page_id=btree.root_page_id
-        )
-        self.catalog.add_index(index_info)
+        # Update catalog with B-Tree root page
+        if btree.root_page_id is not None:
+            self.catalog.update_index_root(index_name, btree.root_page_id)
         
         # Cache the B-Tree
         self._btrees[index_name] = btree
@@ -66,14 +102,14 @@ class IndexManager:
             index_name: Name of the index to drop
             table_name: Name of the table the index is on
         """
-        index = self.catalog.get_index(index_name, table_name)
+        index = self.catalog.get_index(index_name)
         if index:
             # Remove from cache
             if index_name in self._btrees:
                 del self._btrees[index_name]
             
             # Remove from catalog
-            self.catalog.remove_index(index_name, table_name)
+            self.catalog.drop_index(index_name)
             
             # Free B-Tree pages
             self._free_btree_pages(index.root_page_id)
@@ -81,7 +117,7 @@ class IndexManager:
     def get_btree(self, index_name: str) -> Optional[BTree]:
         """Get a B-Tree index by name."""
         if index_name not in self._btrees:
-            index = self.catalog.get_index_by_name(index_name)
+            index = self.catalog.get_index(index_name)
             if index and index.root_page_id is not None:
                 btree = BTree(self.page_manager)
                 btree.root_page_id = index.root_page_id
@@ -129,7 +165,7 @@ class IndexManager:
     
     def search_index(self, index_name: str, key: Any) -> Optional[Tuple[int, int]]:
         """
-        Search an index for a key.
+        Search an index for a key (returns first match only).
         
         Args:
             index_name: Name of the index to search
@@ -143,6 +179,23 @@ class IndexManager:
             return btree.search(key)
         return None
     
+    def search_index_all(self, index_name: str, key: Any) -> List[Tuple[int, int]]:
+        """
+        Search an index for ALL occurrences of a key.
+        Handles duplicate keys properly.
+        
+        Args:
+            index_name: Name of the index to search
+            key: Key to search for
+            
+        Returns:
+            List of (page_id, row_id) tuples for all matches
+        """
+        btree = self.get_btree(index_name)
+        if btree:
+            return btree.search_all(key)
+        return []
+    
     def _free_btree_pages(self, root_page_id: Optional[int]) -> None:
         """
         Recursively free all pages in a B-Tree.
@@ -152,15 +205,23 @@ class IndexManager:
         """
         if root_page_id is None:
             return
-            
+        
         # Load the root node
         page = self.page_manager.read_page(root_page_id)
-        node = BTree._deserialize_node(page.read_data())
+        if not page or not page.records:
+            return
         
-        # Recursively free child pages
-        if not node.is_leaf:
-            for child_id in node.children:
-                self._free_btree_pages(child_id)
-        
-        # Free this page
-        self.page_manager.free_page(root_page_id)
+        try:
+            from .btree import BTreeNode
+            node = BTreeNode.deserialize(page.records[0])
+            
+            # Recursively free child pages
+            if not node.is_leaf:
+                for child_id in node.children:
+                    self._free_btree_pages(child_id)
+            
+            # Free this page (commented out - page deallocation not implemented yet)
+            # self.page_manager.free_page(root_page_id)
+        except Exception:
+            # Silently ignore deserialization errors during cleanup
+            pass

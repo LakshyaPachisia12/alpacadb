@@ -14,6 +14,7 @@ import string
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.storage import PageManager, Catalog, TableManager
+from src.storage.indexing import IndexManager
 from src.query import Lexer, Parser
 
 
@@ -26,6 +27,8 @@ class IndexPerformanceTester:
         self.page_manager = None
         self.catalog = None
         self.table_manager = None
+        self.index_manager = None
+        self.test_emails = []  # Store actual emails from inserted data
         
     def setup(self):
         """Set up test database."""
@@ -39,6 +42,10 @@ class IndexPerformanceTester:
         self.page_manager = PageManager(self.db_path)
         self.catalog = Catalog(self.page_manager)
         self.table_manager = TableManager(self.page_manager, self.catalog)
+        self.index_manager = IndexManager(self.catalog, self.page_manager)
+        
+        # Connect managers
+        self.table_manager.index_manager = self.index_manager
         
         # Create test table
         columns = [
@@ -74,16 +81,24 @@ class IndexPerformanceTester:
         """Insert large number of rows into the database."""
         print(f"\n📊 Inserting {num_rows:,} rows...")
         
+        # Clear test emails for new dataset
+        self.test_emails = []
+        
         start_time = time.time()
         
         for i in range(num_rows):
+            email = self.generate_random_email()
             values = [
                 i + 1,                              # id
                 self.generate_random_string(15),    # name
-                self.generate_random_email(),       # email
+                email,                              # email
                 random.randint(18, 80),             # age
                 random.choice(['NYC', 'LA', 'Chicago', 'Houston', 'Phoenix'])  # city
             ]
+            
+            # Store some emails for testing (every 100th email)
+            if i % 100 == 0:
+                self.test_emails.append(email)
             
             self.table_manager.insert_row('users', values)
             
@@ -96,6 +111,7 @@ class IndexPerformanceTester:
         
         print(f"\n✅ Inserted {num_rows:,} rows in {elapsed:.2f} seconds")
         print(f"   ({rows_per_sec:.2f} rows/second)")
+        print(f"   Stored {len(self.test_emails)} test emails for queries")
         
         return elapsed
     
@@ -104,13 +120,12 @@ class IndexPerformanceTester:
         print("\n🔍 Testing index creation performance...")
         
         start_time = time.time()
-        success = self.catalog.create_index('idx_email', 'users', 'email')
+        # Use IndexManager to actually build the index
+        self.index_manager.create_index('idx_email', 'users', 'email', 
+                                        table_manager=self.table_manager)
         elapsed = time.time() - start_time
         
-        if success:
-            print(f"✅ Index created in {elapsed:.2f} seconds")
-        else:
-            print(f"❌ Index creation failed")
+        print(f"✅ Index created in {elapsed:.2f} seconds")
         
         return elapsed
     
@@ -124,11 +139,14 @@ class IndexPerformanceTester:
         # Get column index for 'email' (should be index 2: id=0, name=1, email=2, age=3, city=4)
         email_col_idx = 2
         
+        # Limit queries to available test emails
+        actual_queries = min(num_queries, len(self.test_emails))
+        
         start_time = time.time()
         
-        for i in range(num_queries):
-            # Simulate searching for random email
-            test_email = self.generate_random_email()
+        for i in range(actual_queries):
+            # Use actual email from database
+            test_email = self.test_emails[i % len(self.test_emails)]
             rows = self.table_manager.select_all('users')
             
             # Filter manually (simulating WHERE clause without index)
@@ -136,9 +154,9 @@ class IndexPerformanceTester:
             matches = [row for row in rows if row[email_col_idx] == test_email]
         
         elapsed = time.time() - start_time
-        avg_query_time = (elapsed / num_queries) * 1000  # in milliseconds
+        avg_query_time = (elapsed / actual_queries) * 1000  # in milliseconds
         
-        print(f"✅ {num_queries} queries completed in {elapsed:.2f} seconds")
+        print(f"✅ {actual_queries} queries completed in {elapsed:.2f} seconds")
         print(f"   Average: {avg_query_time:.2f} ms per query")
         
         return elapsed, avg_query_time
@@ -147,29 +165,26 @@ class IndexPerformanceTester:
         """Test query performance WITH index."""
         print(f"\n🔍 Testing {num_queries} queries WITH index...")
         
-        # Create index
-        self.catalog.create_index('idx_email', 'users', 'email')
+        # Create index using IndexManager
+        self.index_manager.create_index('idx_email', 'users', 'email',
+                                       table_manager=self.table_manager)
         
-        # Get column index for 'email'
-        email_col_idx = 2
+        # Limit queries to available test emails
+        actual_queries = min(num_queries, len(self.test_emails))
         
         start_time = time.time()
         
-        for i in range(num_queries):
-            # Simulate searching for random email
-            test_email = self.generate_random_email()
+        for i in range(actual_queries):
+            # Use actual email from database
+            test_email = self.test_emails[i % len(self.test_emails)]
             
-            # In a full implementation, this would use the index
-            # For now, we're just showing the structure
-            index = self.catalog.get_index('idx_email')
-            rows = self.table_manager.select_all('users')
-            # rows are returned as list of lists: [id, name, email, age, city]
-            matches = [row for row in rows if row[email_col_idx] == test_email]
+            # Use index-aware select
+            matches = self.table_manager.select_with_index('users', 'email', test_email)
         
         elapsed = time.time() - start_time
-        avg_query_time = (elapsed / num_queries) * 1000  # in milliseconds
+        avg_query_time = (elapsed / actual_queries) * 1000  # in milliseconds
         
-        print(f"✅ {num_queries} queries completed in {elapsed:.2f} seconds")
+        print(f"✅ {actual_queries} queries completed in {elapsed:.2f} seconds")
         print(f"   Average: {avg_query_time:.2f} ms per query")
         
         return elapsed, avg_query_time

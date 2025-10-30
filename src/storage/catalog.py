@@ -249,7 +249,8 @@ class Catalog:
     
     # ==================== Index Management ====================
     
-    def create_index(self, index_name: str, table_name: str, column_name: str) -> bool:
+    def create_index(self, index_name: str, table_name: str, column_name: str, 
+                    index_manager=None) -> bool:
         """
         Create an index entry in the catalog.
         
@@ -257,6 +258,7 @@ class Catalog:
             index_name: Name of the index
             table_name: Name of the table being indexed
             column_name: Name of the column being indexed
+            index_manager: Optional IndexManager to build actual B-Tree
             
         Returns:
             True if successful, False if duplicate or invalid
@@ -278,13 +280,13 @@ class Catalog:
             print(f"❌ Column '{column_name}' does not exist in table '{table_name}'")
             return False
         
-        # Create index info
+        # Create index info (B-Tree will be built by IndexManager)
         index_info = IndexInfo(
             index_name=index_name,
             table_name=table_name,
             column_name=column_name,
             index_type="B-Tree",
-            root_page_id=None  # Will be set when B-Tree is actually created
+            root_page_id=None  # Will be set by IndexManager
         )
         
         self.indexes[index_name] = index_info
@@ -312,6 +314,12 @@ class Catalog:
     def get_index(self, index_name: str) -> Optional[IndexInfo]:
         """Get index information by name."""
         return self.indexes.get(index_name)
+    
+    def update_index_root(self, index_name: str, root_page_id: int) -> None:
+        """Update the root page ID for an index."""
+        if index_name in self.indexes:
+            self.indexes[index_name].root_page_id = root_page_id
+            self._save_catalog()
     
     def get_indexes_for_table(self, table_name: str) -> List[IndexInfo]:
         """Get all indexes for a specific table."""

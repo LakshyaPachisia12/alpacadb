@@ -1,77 +1,415 @@
 """
 B-Tree implementation for indexing in AlpacaDB.
+Disk-based B-Tree with O(log n) search and insert complexity.
 """
 
+import struct
+import pickle
 from typing import Any, List, Optional, Tuple
 from ..page_manager import PageManager
-from ..page import Page
+
 
 class BTreeNode:
-    def __init__(self, is_leaf: bool = True, order: int = 4):
+    """
+    Represents a node in the B-Tree.
+    
+    Each node contains:
+    - keys: List of indexed values (sorted)
+    - values: List of (page_id, row_id) tuples (for leaf nodes)
+    - children: List of child page IDs (for internal nodes)
+    - is_leaf: Whether this is a leaf node
+    """
+    
+    def __init__(self, order: int, is_leaf: bool = True):
+        """
+        Initialize a B-Tree node.
+        
+        Args:
+            order: Maximum number of children per node
+            is_leaf: True if this is a leaf node
+        """
+        self.order = order
         self.is_leaf = is_leaf
         self.keys: List[Any] = []
+        self.values: List[Tuple[int, int]] = []  # Only for leaf nodes
         self.children: List[int] = []  # Page IDs of child nodes
-        self.values: List[Tuple[int, int]] = []  # (page_id, row_id) pairs
-        self.order = order
-        self.page_id: Optional[int] = None
-
+    
     def is_full(self) -> bool:
-        return len(self.keys) >= (2 * self.order - 1)
+        """Check if node is full and needs splitting."""
+        return len(self.keys) >= self.order - 1
+    
+    def serialize(self) -> bytes:
+        """Serialize node to bytes for storage."""
+        return pickle.dumps({
+            'order': self.order,
+            'is_leaf': self.is_leaf,
+            'keys': self.keys,
+            'values': self.values,
+            'children': self.children
+        })
+    
+    @staticmethod
+    def deserialize(data: bytes) -> 'BTreeNode':
+        """Deserialize node from bytes."""
+        node_data = pickle.loads(data)
+        node = BTreeNode(node_data['order'], node_data['is_leaf'])
+        node.keys = node_data['keys']
+        node.values = node_data['values']
+        node.children = node_data['children']
+        return node
+
 
 class BTree:
-    def __init__(self, page_manager: PageManager, order: int = 4):
+    """
+    Disk-based B-Tree for indexing with O(log n) operations.
+    
+    Maps keys to (page_id, row_id) tuples for fast lookups.
+    Nodes are persisted to disk pages for scalability.
+    """
+    
+    def __init__(self, page_manager: PageManager, order: int = 50):
+        """
+        Initialize B-Tree.
+        
+        Args:
+            page_manager: PageManager for disk I/O
+            order: B-Tree order (max children per node, default 50)
+        """
         self.order = order
         self.page_manager = page_manager
         self.root_page_id: Optional[int] = None
-
-    def insert(self, key: Any, value: Tuple[int, int]) -> None:
-        """Insert a key-value pair into the B-Tree."""
+        # CACHE DISABLED: Every access reads from disk for true O(log n) behavior
+        # self._node_cache = {}  # Cache nodes in memory for performance
+        
+        # Create root node
         if self.root_page_id is None:
-            # Create root node
-            root = BTreeNode(is_leaf=True, order=self.order)
-            root.keys.append(key)
-            root.values.append(value)
-            page = Page()
-            page.write_data(self._serialize_node(root))
-            self.root_page_id = self.page_manager.allocate_page(page)
-            return
+            root_node = BTreeNode(order, is_leaf=True)
+            self.root_page_id = self._write_node(root_node)
 
-        root = self._load_node(self.root_page_id)
-        if root.is_full():
-            # Split root
-            new_root = BTreeNode(is_leaf=False, order=self.order)
-            new_root.children.append(self.root_page_id)
-            self._split_child(new_root, 0, root)
-            page = Page()
-            page.write_data(self._serialize_node(new_root))
-            self.root_page_id = self.page_manager.allocate_page(page)
-            self._insert_non_full(new_root, key, value)
-        else:
-            self._insert_non_full(root, key, value)
+    def _write_node(self, node: BTreeNode) -> int:
+        """
+        Write a node to disk and return its page ID.
+        
+        Args:
+            node: The node to write
+            
+        Returns:
+            Page ID where the node is stored
+        """
+        page = self.page_manager.allocate_page(page_type=2)  # INDEX type
+        serialized = node.serialize()
+        page.records = [serialized]  # Store entire node as one record
+        self.page_manager.write_page(page)
+        # CACHE DISABLED: No cache updates
+        # self._node_cache[page.page_id] = node
+        return page.page_id
+    
+    def _read_node(self, page_id: int) -> Optional[BTreeNode]:
+        """
+        Read a node from disk (NO CACHING - true O(log n) behavior).
+        
+        Args:
+            page_id: Page ID to read from
+            
+        Returns:
+            BTreeNode or None if not found
+        """
+        # CACHE DISABLED: Always read from disk for accurate performance
+        page = self.page_manager.read_page(page_id)
+        if not page or not page.records:
+            return None
+        
+        node = BTreeNode.deserialize(page.records[0])
+        return node
+    
+    def _update_node(self, page_id: int, node: BTreeNode) -> None:
+        """
+        Update a node on disk.
+        
+        Args:
+            page_id: Page ID to update
+            node: Updated node
+        """
+        page = self.page_manager.read_page(page_id)
+        if page:
+            serialized = node.serialize()
+            page.records = [serialized]
+            self.page_manager.write_page(page)
+            # CACHE DISABLED: No cache updates
+            # self._node_cache[page_id] = node
+    
+    def _binary_search(self, keys: List[Any], key: Any) -> int:
+        """
+        Binary search to find insertion position.
+        
+        Args:
+            keys: Sorted list of keys
+            key: Key to search for
+            
+        Returns:
+            Index where key should be inserted
+        """
+        left, right = 0, len(keys)
+        while left < right:
+            mid = (left + right) // 2
+            if keys[mid] < key:
+                left = mid + 1
+            else:
+                right = mid
+        return left
 
     def search(self, key: Any) -> Optional[Tuple[int, int]]:
-        """Search for a key in the B-Tree and return its associated value."""
+        """
+        Search for a key in the B-Tree.
+        O(log n) complexity.
+        
+        NOTE: Returns only the FIRST match. For duplicate keys, use search_all().
+        
+        Args:
+            key: The value to search for
+            
+        Returns:
+            (page_id, row_id) tuple if found, None otherwise
+        """
         if self.root_page_id is None:
             return None
-        return self._search_node(self._load_node(self.root_page_id), key)
+        
+        # Track search depth (commented out for performance)
+        # self._search_depth = 0
+        result = self._search_recursive(self.root_page_id, key)
+        # print(f"🔍 Search depth: {self._search_depth}")
+        return result
+    
+    def search_all(self, key: Any) -> List[Tuple[int, int]]:
+        """
+        Search for ALL occurrences of a key in the B-Tree.
+        Handles duplicate keys by returning all matches.
+        O(log n + k) complexity where k is the number of matches.
+        
+        Args:
+            key: The value to search for
+            
+        Returns:
+            List of (page_id, row_id) tuples for all matches
+        """
+        if self.root_page_id is None:
+            return []
+        
+        results = []
+        self._search_all_recursive(self.root_page_id, key, results)
+        return results
+    
+    def _search_all_recursive(self, page_id: int, key: Any, results: List[Tuple[int, int]]) -> None:
+        """
+        Recursive search to find ALL occurrences of a key.
+        
+        Args:
+            page_id: Current node's page ID
+            key: Key to search for
+            results: List to accumulate results (modified in place)
+        """
+        node = self._read_node(page_id)
+        if not node:
+            return
+        
+        # Binary search to find first occurrence of key
+        idx = self._binary_search(node.keys, key)
+        
+        if node.is_leaf:
+            # Collect all matching keys in this leaf node
+            # Keys are sorted, so collect consecutive matches
+            while idx < len(node.keys) and node.keys[idx] == key:
+                results.append(node.values[idx])
+                idx += 1
+        else:
+            # For internal nodes, search in appropriate subtree(s)
+            # Check if key exists at this position
+            if idx < len(node.keys) and node.keys[idx] == key:
+                # Key found - search both left and right subtrees
+                self._search_all_recursive(node.children[idx], key, results)
+                self._search_all_recursive(node.children[idx + 1], key, results)
+            else:
+                # Key not at this position - search appropriate child
+                self._search_all_recursive(node.children[idx], key, results)
+
+    
+    def _search_recursive(self, page_id: int, key: Any, depth: int = 0) -> Optional[Tuple[int, int]]:
+        """
+        Recursive search through B-Tree.
+        
+        Args:
+            page_id: Current node's page ID
+            key: Key to search for
+            depth: Current depth in tree (for debugging)
+            
+        Returns:
+            (page_id, row_id) if found, None otherwise
+        """
+        # self._search_depth = depth  # Track depth
+        node = self._read_node(page_id)
+        if not node:
+            return None
+        
+        # Binary search within node
+        idx = self._binary_search(node.keys, key)
+        
+        # Check if key exists at this position
+        if idx < len(node.keys) and node.keys[idx] == key:
+            if node.is_leaf:
+                return node.values[idx]
+            # For internal nodes, go to right child
+            return self._search_recursive(node.children[idx + 1], key, depth + 1)
+        
+        # If leaf node and not found
+        if node.is_leaf:
+            return None
+        
+        # Recurse to appropriate child
+        return self._search_recursive(node.children[idx], key, depth + 1)
+
+    def insert(self, key: Any, value: Tuple[int, int]) -> None:
+        """
+        Insert a key-value pair into the B-Tree.
+        O(log n) complexity with potential node splits.
+        
+        Args:
+            key: The indexed value (e.g., email address)
+            value: Tuple of (page_id, row_id) where the row is stored
+        """
+        root = self._read_node(self.root_page_id)
+        
+        # If root is full, split it
+        if root.is_full():
+            new_root = BTreeNode(self.order, is_leaf=False)
+            new_root.children.append(self.root_page_id)
+            
+            # Split the old root
+            new_child_id = self._split_child(self.root_page_id, new_root, 0)
+            
+            # Write new root
+            self.root_page_id = self._write_node(new_root)
+        
+        # Insert into non-full root
+        self._insert_non_full(self.root_page_id, key, value)
+    
+    def _insert_non_full(self, page_id: int, key: Any, value: Tuple[int, int]) -> None:
+        """
+        Insert into a node that is not full.
+        
+        Args:
+            page_id: Node's page ID
+            key: Key to insert
+            value: Value to insert
+        """
+        node = self._read_node(page_id)
+        idx = self._binary_search(node.keys, key)
+        
+        if node.is_leaf:
+            # Insert into leaf node
+            node.keys.insert(idx, key)
+            node.values.insert(idx, value)
+            self._update_node(page_id, node)
+        else:
+            # Recurse to child
+            child_id = node.children[idx]
+            child = self._read_node(child_id)
+            
+            if child.is_full():
+                # Split child before recursing
+                self._split_child(child_id, node, idx)
+                self._update_node(page_id, node)
+                
+                # Determine which of the two children to recurse to
+                if key > node.keys[idx]:
+                    idx += 1
+                child_id = node.children[idx]
+            
+            self._insert_non_full(child_id, key, value)
+    
+    def _split_child(self, child_id: int, parent: BTreeNode, idx: int) -> int:
+        """
+        Split a full child node.
+        
+        Args:
+            child_id: Page ID of child to split
+            parent: Parent node
+            idx: Index of child in parent's children list
+            
+        Returns:
+            Page ID of new right sibling
+        """
+        child = self._read_node(child_id)
+        mid = len(child.keys) // 2
+        
+        # CRITICAL FIX: Save the median key BEFORE modifying arrays
+        # For leaf nodes, promote the first key of right sibling
+        # For internal nodes, promote the median key
+        if child.is_leaf:
+            promoted_key = child.keys[mid]
+        else:
+            promoted_key = child.keys[mid]
+        
+        # Create new right sibling
+        new_node = BTreeNode(self.order, is_leaf=child.is_leaf)
+        
+        # Move half of keys to new node
+        if child.is_leaf:
+            # For leaf nodes: keep median in left, copy to right
+            new_node.keys = child.keys[mid:]
+            child.keys = child.keys[:mid]
+            new_node.values = child.values[mid:]
+            child.values = child.values[:mid]
+        else:
+            # For internal nodes: median goes to parent, split children
+            new_node.keys = child.keys[mid + 1:]
+            child.keys = child.keys[:mid]
+            new_node.children = child.children[mid + 1:]
+            child.children = child.children[:mid + 1]
+        
+        # Write new sibling
+        new_node_id = self._write_node(new_node)
+        
+        # Update child
+        self._update_node(child_id, child)
+        
+        # Insert promoted key into parent
+        parent.keys.insert(idx, promoted_key)
+        parent.children.insert(idx + 1, new_node_id)
+        
+        return new_node_id
 
     def delete(self, key: Any) -> bool:
-        """Delete a key from the B-Tree."""
+        """
+        Delete a key from the B-Tree.
+        
+        Args:
+            key: The key to delete
+            
+        Returns:
+            True if key was found and deleted, False otherwise
+        """
+        # Simplified delete: just mark as not implemented for now
+        # Full B-Tree deletion is complex with rebalancing
+        raise NotImplementedError("B-Tree deletion with rebalancing not yet implemented")
+    
+    def size(self) -> int:
+        """
+        Return the number of entries in the index.
+        Note: Requires traversing entire tree.
+        """
         if self.root_page_id is None:
-            return False
-        return self._delete_node(self._load_node(self.root_page_id), key)
-
-    def _serialize_node(self, node: BTreeNode) -> bytes:
-        """Convert node to bytes for storage."""
-        # Implementation details here
-        pass
-
-    def _deserialize_node(self, data: bytes) -> BTreeNode:
-        """Convert bytes back to node."""
-        # Implementation details here
-        pass
-
-    def _load_node(self, page_id: int) -> BTreeNode:
-        """Load a node from disk."""
-        page = self.page_manager.read_page(page_id)
-        return self._deserialize_node(page.read_data())
+            return 0
+        return self._count_keys(self.root_page_id)
+    
+    def _count_keys(self, page_id: int) -> int:
+        """Recursively count keys in tree."""
+        node = self._read_node(page_id)
+        if not node:
+            return 0
+        
+        count = len(node.keys)
+        if not node.is_leaf:
+            for child_id in node.children:
+                count += self._count_keys(child_id)
+        
+        return count
