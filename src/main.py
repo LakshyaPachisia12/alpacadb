@@ -1,87 +1,150 @@
 """
-AlpacaDB - Main Entry Point
+AlpacaDB Demo Application
 
-This file provides a simple CLI and demo to test the
-storage engine functionality from end-to-end.
+Demonstrates storage engine and query parser functionality.
 """
 
 import os
-import shutil
-from storage import PageManager, Catalog, TableManager
+import sys
 
-# Constants
-DB_DIR = "data"
-DB_FILE = os.path.join(DB_DIR, "alpacadb.db")
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-def run_demo():
-    """
-    Execute a simple demo:
-    1. Clean up old data
-    2. Initialize managers
-    3. Create a 'users' table
-    4. Insert 3 rows
-    5. Select all rows back
-    6. Close the database
-    """
-    print("🦙 Welcome to the AlpacaDB Demo!")
-    print("="*40)
-    
-    # 1. Clean up old data directory
-    if os.path.exists(DB_DIR):
-        shutil.rmtree(DB_DIR)
-        print(f"🧹 Cleaned up old '{DB_DIR}' directory.")
-    os.makedirs(DB_DIR, exist_ok=True)
+from src.storage import PageManager, Catalog, TableManager
+from src.query import Lexer, Parser
 
-    # 2. Initialize all managers
-    print(f"🚀 Initializing database file at: {DB_FILE}")
-    page_manager = None
-    try:
-        page_manager = PageManager(DB_FILE)
-        catalog = Catalog(page_manager)
-        table_manager = TableManager(page_manager, catalog)
-        
-        # 3. Create a 'users' table
-        print("\n[Demo] Creating 'users' table...")
-        user_schema = [
-            {'name': 'id', 'type': 'INT', 'nullable': False},
-            {'name': 'name', 'type': 'STRING', 'nullable': False},
-            {'name': 'age', 'type': 'INT', 'nullable': True}
-        ]
-        catalog.create_table('users', user_schema)
-        
-        # 4. Insert rows
-        print("\n[Demo] Inserting rows...")
-        table_manager.insert_row('users', [1, 'Alice', 25])
-        table_manager.insert_row('users', [2, 'Bob', 30])
-        table_manager.insert_row('users', [3, 'Charlie', None])  # Test NULL
-        
-        # 5. Select all
-        print("\n[Demo] Selecting all rows from 'users'...")
-        rows = table_manager.select_all('users')
-        
-        print("\n📊 Results:")
-        print("---------------------------------")
-        print(f"  {'ID':<3} | {'Name':<10} | {'Age':<5}")
-        print("---------------------------------")
-        for row in rows:
-            print(f"  {row[0]:<3} | {row[1]:<10} | {row[2] or 'NULL':<5}")
-        print("---------------------------------")
-        
-    except Exception as e:
-        print(f"\n🚨 An error occurred: {e}")
+
+def demo_storage_engine():
+    """Demo original storage engine (Sprint 1)."""
+    print("=" * 60)
+    print("🦙 AlpacaDB Demo - Storage Engine (Sprint 1)")
+    print("=" * 60)
     
-    finally:
-        # 6. Close the database
-        if page_manager:
-            page_manager.close()
+    # Clean up old database
+    db_path = 'data/alpacadb_demo.db'
+    if os.path.exists(db_path):
+        os.remove(db_path)
     
-    print("\n="*40)
-    print("Demo complete. Data is safe on disk.")
+    # Initialize
+    page_manager = PageManager(db_path)
+    catalog = Catalog(page_manager)
+    table_manager = TableManager(page_manager, catalog)
+    
+    print("\n[1] Creating 'users' table...")
+    catalog.create_table('users', [
+        {'name': 'id', 'type': 'INT', 'nullable': False},
+        {'name': 'name', 'type': 'STRING', 'nullable': False},
+        {'name': 'age', 'type': 'INT', 'nullable': True}
+    ])
+    
+    print("\n[2] Inserting rows...")
+    table_manager.insert_row('users', [1, 'Alice', 25])
+    table_manager.insert_row('users', [2, 'Bob', 30])
+    table_manager.insert_row('users', [3, 'Charlie', 35])
+    
+    print("\n[3] Selecting all rows...")
+    rows = table_manager.select_all('users')
+    
+    print("\nResults:")
+    print("-" * 60)
+    for row in rows:
+        print(f"  {row}")
+    
+    page_manager.close()
+    print("\n" + "=" * 60)
+
+
+def demo_query_parser():
+    """Demo query parser (Sprint 2)."""
+    print("\n\n")
+    print("=" * 60)
+    print("🦙 AlpacaDB Demo - Query Parser (Sprint 2)")
+    print("=" * 60)
+    
+    queries = [
+        "CREATE TABLE employees (emp_id INT PRIMARY KEY, name STRING, salary INT)",
+        "INSERT INTO employees VALUES (101, 'Alice', 50000)",
+        "SELECT * FROM employees WHERE salary > 40000",
+        "UPDATE employees SET salary=55000 WHERE emp_id=101",
+        "DELETE FROM employees WHERE salary < 30000",
+        "CREATE INDEX idx_salary ON employees (salary)",
+        "BEGIN",
+        "COMMIT"
+    ]
+    
+    print("\n[Parsing Example Queries]\n")
+    
+    for i, query in enumerate(queries, 1):
+        print(f"{i}. Query: {query}")
+        
+        try:
+            # Lexical analysis
+            lexer = Lexer(query)
+            tokens = lexer.tokenize()
+            print(f"   Tokens: {len(tokens)-1} tokens generated")  # -1 for EOF
+            
+            # Parsing
+            parser = Parser(tokens)
+            ast = parser.parse()
+            print(f"   AST: {type(ast).__name__}")
+            print(f"   ✅ Parsed successfully\n")
+            
+        except Exception as e:
+            print(f"   ❌ Error: {e}\n")
+    
+    print("=" * 60)
+
+
+def demo_interactive_cli():
+    """Show how to use interactive CLI."""
+    print("\n\n")
+    print("=" * 60)
+    print("🦙 AlpacaDB - Interactive CLI")
+    print("=" * 60)
+    
+    print("\nTo use the interactive CLI, run:")
+    print("\n  python src/cli.py")
+    
+    print("\nExample session:")
+    print("""
+    alpacadb> CREATE TABLE products (id INT PRIMARY KEY, name STRING, price INT);
+    ✅ Table 'products' created successfully
+    
+    alpacadb> INSERT INTO products VALUES (1, 'Laptop', 1000);
+    ✅ 1 row(s) inserted into 'products'
+    
+    alpacadb> SELECT * FROM products;
+    ┌────┬────────┬───────┐
+    │ id │ name   │ price │
+    ├────┼────────┼───────┤
+    │ 1  │ Laptop │ 1000  │
+    └────┴────────┴───────┘
+    1 row(s) retrieved (0.002ms)
+    
+    alpacadb> \\quit
+    Goodbye! 🦙
+    """)
+    
+    print("=" * 60)
+
+
+def main():
+    """Run all demos."""
+    # Demo 1: Storage Engine
+    demo_storage_engine()
+    
+    # Demo 2: Query Parser
+    demo_query_parser()
+    
+    # Demo 3: Interactive CLI instructions
+    demo_interactive_cli()
+    
+    print("\n✅ Demo completed successfully!")
+    print("\nNext steps:")
+    print("  • Try interactive CLI: python src/cli.py")
+    print("  • Run tests: pytest tests/ -v")
+    print("  • Check coverage: pytest --cov=src --cov-report=html")
+
 
 if __name__ == '__main__':
-    # Add src to Python path to allow imports
-    import sys
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    
-    from src.storage import PageManager, Catalog, TableManager
-    run_demo()
+    main()

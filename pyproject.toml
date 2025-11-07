@@ -3,7 +3,7 @@ name = "pesu-rr-cse-f-p71-automated-database-backup-system-alpaca"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "bandit==1.7.5",
     "pylint==3.0.3",
