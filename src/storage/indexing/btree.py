@@ -52,6 +52,22 @@ class BTree:
         if self.root_page_id is None:
             return None
         return self._search_node(self._load_node(self.root_page_id), key)
+    
+    def search_all(self, key: Any) -> List[Tuple[int, int]]:
+        """
+        Search for a key in the B-Tree and return ALL associated values.
+        
+        This handles duplicate keys by returning all matching entries.
+        
+        Args:
+            key: Key to search for
+            
+        Returns:
+            List of (page_id, row_id) tuples for all matching entries
+        """
+        if self.root_page_id is None:
+            return []
+        return self._search_all_node(self._load_node(self.root_page_id), key)
 
     def delete(self, key: Any) -> bool:
         """Delete a key from the B-Tree."""
@@ -93,6 +109,40 @@ class BTree:
             return self._search_node(child, key)
         
         return None
+    
+    def _search_all_node(self, node: BTreeNode, key: Any) -> List[Tuple[int, int]]:
+        """
+        Search for ALL occurrences of a key within a node (recursively).
+        
+        Handles duplicate keys by collecting all matching entries.
+        
+        Args:
+            node: Node to search in
+            key: Key to search for
+            
+        Returns:
+            List of (page_id, row_id) tuples for all matching entries
+        """
+        results = []
+        
+        # Find position where key should be
+        i = 0
+        while i < len(node.keys) and key >= node.keys[i]:
+            i += 1
+        
+        # If leaf node, collect all matching keys
+        if node.is_leaf:
+            for j in range(len(node.keys)):
+                if node.keys[j] == key:
+                    results.append(node.values[j])
+            return results
+        
+        # Internal node: navigate to appropriate child
+        if i < len(node.children):
+            child = self._load_node(node.children[i])
+            return self._search_all_node(child, key)
+        
+        return results
 
     def _serialize_node(self, node: BTreeNode) -> bytes:
         """

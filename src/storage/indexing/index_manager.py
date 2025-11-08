@@ -34,13 +34,17 @@ class IndexManager:
             column_name: Name of the column to index
             index_type: Type of index (currently only B-Tree supported)
         """
+        # Validate table exists
+        table_schema = self.catalog.get_table_schema(table_name)
+        if not table_schema:
+            raise ValueError(f"Table '{table_name}' does not exist")
+        
         # Create new B-Tree
         btree = BTree(self.page_manager)
         
         # Build index by scanning table
-        table_schema = self.catalog.get_table_schema(table_name)
-        if not table_schema or table_schema.first_page_id is None:
-            # Empty table or doesn't exist - just create empty index
+        if table_schema.first_page_id is None:
+            # Empty table - just create empty index
             index_info = IndexInfo(
                 index_name=index_name,
                 table_name=table_name,
@@ -105,17 +109,17 @@ class IndexManager:
             index_name: Name of the index to drop
             table_name: Name of the table the index is on
         """
-        index = self.catalog.get_index(index_name, table_name)
+        index = self.catalog.get_index(index_name)
         if index:
             # Remove from cache
             if index_name in self._btrees:
                 del self._btrees[index_name]
             
             # Remove from catalog
-            self.catalog.remove_index(index_name, table_name)
+            self.catalog.drop_index(index_name)
             
-            # Free B-Tree pages
-            self._free_btree_pages(index.root_page_id)
+            # TODO: Free B-Tree pages (requires PageManager.free_page implementation)
+            # self._free_btree_pages(index.root_page_id)
     
     def get_btree(self, index_name: str) -> Optional[BTree]:
         """Get a B-Tree index by name."""
@@ -185,6 +189,22 @@ class IndexManager:
             return btree.search(key)
         return None
     
+    def search_index_all(self, index_name: str, key: Any) -> List[Tuple[int, int]]:
+        """
+        Search an index for ALL occurrences of a key (handles duplicates).
+        
+        Args:
+            index_name: Name of the index to search
+            key: Key to search for
+            
+        Returns:
+            List of (page_id, row_id) tuples for all matching entries
+        """
+        btree = self.get_btree(index_name)
+        if btree:
+            return btree.search_all(key)
+        return []
+    
     def _free_btree_pages(self, root_page_id: Optional[int]) -> None:
         """
         Recursively free all pages in a B-Tree.
@@ -197,7 +217,12 @@ class IndexManager:
             
         # Load the root node
         page = self.page_manager.read_page(root_page_id)
-        node = BTree._deserialize_node(page.read_data())
+        if not page or not page.records:
+            return
+        
+        # Create temporary BTree to deserialize the node
+        btree = BTree(self.page_manager)    
+        node = btree._deserialize_node(page.records[0])
         
         # Recursively free child pages
         if not node.is_leaf:
@@ -206,3 +231,50 @@ class IndexManager:
         
         # Free this page
         self.page_manager.free_page(root_page_id)
+    
+    def rebuild_indexes_for_table(self, table_name: str) -> None:
+        """
+        Rebuild all indexes for a table.
+        
+        This is a temporary solution for UPDATE/DELETE operations since
+        B-Tree delete is not yet implemented. After rewriting a table,
+        we drop and recreate all indexes to maintain correctness.
+        
+        TODO: Replace with proper B-Tree delete implementation in Phase 3.
+        
+        Args:
+            table_name: Name of the table whose indexes should be rebuilt
+        """
+        # Get all indexes for this table
+        indexes = self.catalog.get_indexes_for_table(table_name)
+        
+        if not indexes:
+            return  # No indexes to rebuild
+        
+        print(f"🔄 Rebuilding {len(indexes)} index(es) for table '{table_name}'...")
+        
+        # Store index definitions
+        index_definitions = []
+        for index in indexes:
+            index_definitions.append({
+                'index_name': index.index_name,
+                'column_name': index.column_name,
+                'index_type': index.index_type
+            })
+        
+        # Drop all indexes
+        for index_def in index_definitions:
+            self.drop_index(index_def['index_name'], table_name)
+        
+        # Recreate all indexes
+        for index_def in index_definitions:
+            self.create_index(
+                index_def['index_name'],
+                table_name,
+                index_def['column_name'],
+                index_def['index_type']
+            )
+        
+        print(f"✅ Index rebuild complete")
+
+
