@@ -30,6 +30,17 @@ class TokenType(Enum):
     UPDATE = auto()
     DELETE = auto()
     
+    # Aggregate Functions
+    COUNT = auto()
+    SUM = auto()
+    AVG = auto()
+    MIN = auto()
+    MAX = auto()
+    
+    # Grouping Keywords
+    GROUP = auto()
+    HAVING = auto()
+    
     # Clauses
     FROM = auto()
     WHERE = auto()
@@ -144,6 +155,13 @@ KEYWORDS = {
     'INSERT': TokenType.INSERT,
     'UPDATE': TokenType.UPDATE,
     'DELETE': TokenType.DELETE,
+    'COUNT': TokenType.COUNT,
+    'SUM': TokenType.SUM,
+    'AVG': TokenType.AVG,
+    'MIN': TokenType.MIN,
+    'MAX': TokenType.MAX,
+    'GROUP': TokenType.GROUP,
+    'HAVING': TokenType.HAVING,
     'FROM': TokenType.FROM,
     'WHERE': TokenType.WHERE,
     'INTO': TokenType.INTO,

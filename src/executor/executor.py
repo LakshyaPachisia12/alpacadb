@@ -5,7 +5,7 @@ Converts AST nodes into physical operator trees and executes them.
 """
 
 from typing import List, Any, Optional, Tuple
-from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator
+from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator
 from ..query.ast_nodes import (
     SelectNode,
     InsertNode,
@@ -122,7 +122,24 @@ class QueryExecutor:
                 column_names=all_column_names,
             )
 
-        # 3. Sort Operator (ORDER BY clause)
+        # 3. Aggregate Operator (GROUP BY and aggregate functions)
+        if node.aggregates or node.group_by:
+            group_by_columns = []
+            having_predicate = None
+            
+            if node.group_by:
+                group_by_columns = node.group_by.columns
+                having_predicate = node.group_by.having_clause
+            
+            current_operator = AggregateOperator(
+                child=current_operator,
+                aggregates=node.aggregates,
+                group_by_columns=group_by_columns,
+                having_predicate=having_predicate,
+                column_names=all_column_names,
+            )
+
+        # 4. Sort Operator (ORDER BY clause)
         if node.order_by:
             # Convert order_by to list of (column, is_desc) tuples
             order_by_list = []
@@ -144,23 +161,40 @@ class QueryExecutor:
                 column_names=all_column_names,
             )
 
-        # 4. Project Operator (SELECT columns) - always at the top
-        projection_columns = node.columns if node.columns else ["*"]
-
-        current_operator = ProjectOperator(
-            child=current_operator,
-            projection_columns=projection_columns,
-            input_columns=all_column_names,
-        )
+        # 4. Project Operator (SELECT columns) - skip if we have aggregates
+        if node.aggregates or node.group_by:
+            # For aggregates, the AggregateOperator produces the final schema
+            # No projection needed
+            pass
+        else:
+            # Normal projection for non-aggregate queries
+            projection_columns = node.columns if node.columns else ["*"]
+            current_operator = ProjectOperator(
+                child=current_operator,
+                projection_columns=projection_columns,
+                input_columns=all_column_names,
+            )
 
         # Execute the operator tree
         results = current_operator.execute()
 
         # Determine output column names
-        if "*" in projection_columns:
+        if node.aggregates or node.group_by:
+            # For aggregate queries, output columns are group-by columns + aggregate results
+            output_columns = []
+            if node.group_by:
+                output_columns.extend(node.group_by.columns)
+            # Add aggregate column names (use aliases if available, otherwise generated names)
+            for agg in node.aggregates:
+                if agg.alias:
+                    output_columns.append(agg.alias)
+                else:
+                    col_name = agg.column if agg.column else '*'
+                    output_columns.append(f"{agg.func_name}({col_name})")
+        elif "*" in (node.columns or ["*"]):
             output_columns = all_column_names
         else:
-            output_columns = [col.lower() for col in projection_columns]
+            output_columns = [col.lower() for col in (node.columns or [])]
 
         return results, output_columns
 

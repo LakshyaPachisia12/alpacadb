@@ -348,24 +348,33 @@ class Parser:
     
     def _select_statement(self) -> SelectNode:
         """
-        Parse: SELECT columns FROM table [WHERE condition] [ORDER BY column]
+        Parse: SELECT columns FROM table [WHERE condition] [GROUP BY cols] [HAVING condition] [ORDER BY column]
         
         Examples:
             SELECT * FROM users
-            SELECT id, name FROM users WHERE age > 18
-            SELECT * FROM users ORDER BY name ASC
+            SELECT COUNT(*), department FROM employees GROUP BY department
+            SELECT department, AVG(salary) FROM employees GROUP BY department HAVING AVG(salary) > 50000
         """
         # SELECT token already consumed by _statement()
         
-        # Columns (* or col1, col2, ...)
+        # Columns (* or col1, col2, ... or aggregate functions)
         columns = []
+        aggregates = []
+        
         if self._check(TokenType.STAR):
             self._consume(TokenType.STAR)
             columns = ['*']
         else:
             while True:
-                col_token = self._consume(TokenType.IDENTIFIER)
-                columns.append(col_token.value)
+                # Check if it's an aggregate function
+                if self._check_aggregate_function():
+                    agg_func = self._parse_aggregate_function()
+                    aggregates.append(agg_func)
+                    # Also add to columns for backward compatibility
+                    columns.append(str(agg_func))
+                else:
+                    col_token = self._consume(TokenType.IDENTIFIER)
+                    columns.append(col_token.value)
                 
                 if not self._check(TokenType.COMMA):
                     break
@@ -389,6 +398,11 @@ class Parser:
         if self._check(TokenType.INNER) or self._check(TokenType.JOIN):
             join_clause = self._join_clause()
         
+        # Optional GROUP BY clause
+        group_by = None
+        if self._check(TokenType.GROUP):
+            group_by = self._parse_group_by_clause()
+        
         # Optional ORDER BY clause
         order_by = None
         if self._check(TokenType.ORDER):
@@ -407,7 +421,7 @@ class Parser:
         if self._check(TokenType.SEMICOLON):
             self._consume(TokenType.SEMICOLON)
         
-        return SelectNode(columns, table_name, where_clause, order_by, join_clause)
+        return SelectNode(columns, table_name, where_clause, group_by, order_by, join_clause, aggregates)
     
     def _update_statement(self) -> UpdateNode:
         """
@@ -502,6 +516,89 @@ class Parser:
         condition = self._expression()
         
         return JoinClause('INNER', table_name, condition)
+    
+    def _parse_aggregate_function(self) -> AggregateFunction:
+        """
+        Parse aggregate function: COUNT(*), SUM(column), etc.
+        
+        Examples:
+            COUNT(*)
+            SUM(salary)
+            AVG(age) AS average_age
+        """
+        # Consume the function name token
+        func_token = self._consume_aggregate_function()
+        func_name = func_token.value.upper()
+        
+        self._consume(TokenType.LEFT_PAREN)
+        
+        column = None
+        if not self._check(TokenType.STAR):
+            col_token = self._consume(TokenType.IDENTIFIER)
+            column = col_token.value
+        else:
+            self._consume(TokenType.STAR)
+        
+        self._consume(TokenType.RIGHT_PAREN)
+        
+        # Optional AS alias
+        alias = None
+        if self._check(TokenType.IDENTIFIER) and self._peek().value.upper() == 'AS':
+            self._consume(TokenType.IDENTIFIER)  # consume 'AS'
+            alias_token = self._consume(TokenType.IDENTIFIER)
+            alias = alias_token.value
+        
+        return AggregateFunction(func_name, column, alias)
+    
+    def _parse_group_by_clause(self) -> GroupByNode:
+        """
+        Parse GROUP BY clause with optional HAVING.
+        
+        Examples:
+            GROUP BY department
+            GROUP BY department, city HAVING COUNT(*) > 5
+        """
+        self._consume(TokenType.GROUP)
+        self._consume(TokenType.BY)
+        
+        # Group columns
+        columns = []
+        while True:
+            col_token = self._consume(TokenType.IDENTIFIER)
+            columns.append(col_token.value)
+            
+            if not self._check(TokenType.COMMA):
+                break
+            self._consume(TokenType.COMMA)
+        
+        # Optional HAVING clause
+        having_clause = None
+        if self._check(TokenType.HAVING):
+            self._consume(TokenType.HAVING)
+            having_clause = self._expression()
+        
+        return GroupByNode(columns, having_clause)
+    
+    def _consume_aggregate_function(self) -> Token:
+        """Consume and return an aggregate function token."""
+        if self._check(TokenType.COUNT):
+            return self._consume(TokenType.COUNT)
+        elif self._check(TokenType.SUM):
+            return self._consume(TokenType.SUM)
+        elif self._check(TokenType.AVG):
+            return self._consume(TokenType.AVG)
+        elif self._check(TokenType.MIN):
+            return self._consume(TokenType.MIN)
+        elif self._check(TokenType.MAX):
+            return self._consume(TokenType.MAX)
+        else:
+            raise ParseError(f"Expected aggregate function, got {self._peek()}")
+    
+    def _check_aggregate_function(self) -> bool:
+        """Check if current token is an aggregate function."""
+        return self._check(TokenType.COUNT) or self._check(TokenType.SUM) or \
+               self._check(TokenType.AVG) or self._check(TokenType.MIN) or \
+               self._check(TokenType.MAX)
     
     # ==================== Expression Parsing ====================
     
