@@ -177,7 +177,9 @@ class IndexManager:
     def delete_entry(self, table_name: str, column_values: Dict[str, Any],
                     page_id: int, row_id: int) -> None:
         """
-        Delete entries from all indexes for a table.
+        Phase 3: Delete entries from all indexes for a table (incremental).
+        
+        Uses delete_entry() instead of full rebuild for better performance.
         
         Args:
             table_name: Name of the table
@@ -191,7 +193,12 @@ class IndexManager:
                 btree = self.get_btree(index.index_name)
                 if btree:
                     key = column_values[index.column_name]
-                    btree.delete(key)
+                    # Phase 3: Use delete_entry() for incremental deletion
+                    btree.delete_entry(key, (page_id, row_id))
+                    # Save updated tree
+                    if btree.root_page_id:
+                        index.root_page_id = btree.root_page_id
+                        self.catalog._save_catalog()
     
     def search_index(self, index_name: str, key: Any) -> Optional[Tuple[int, int]]:
         """
@@ -223,6 +230,26 @@ class IndexManager:
         btree = self.get_btree(index_name)
         if btree:
             return btree.search_all(key)
+        return []
+    
+    def range_search_index(self, index_name: str, start_key: Any, end_key: Any,
+                          include_start: bool = True, include_end: bool = True) -> List[Tuple[int, int]]:
+        """
+        Phase 3: Search an index for all keys in a range.
+        
+        Args:
+            index_name: Name of the index to search
+            start_key: Start of range (None = -infinity)
+            end_key: End of range (None = +infinity)
+            include_start: Whether to include start_key (>= vs >)
+            include_end: Whether to include end_key (<= vs <)
+            
+        Returns:
+            List of (page_id, row_id) tuples for all matching entries
+        """
+        btree = self.get_btree(index_name)
+        if btree:
+            return btree.range_search(start_key, end_key, include_start, include_end)
         return []
     
     def _free_btree_pages(self, root_page_id: Optional[int]) -> None:

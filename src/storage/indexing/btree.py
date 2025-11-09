@@ -16,6 +16,7 @@ class BTreeNode:
         self.values: List[Tuple[int, int]] = []  # (page_id, row_id) pairs
         self.order = order
         self.page_id: Optional[int] = None
+        self.next_leaf_page_id: Optional[int] = None  # For range scans: link to next leaf
 
     def is_full(self) -> bool:
         return len(self.keys) >= (2 * self.order - 1)
@@ -68,6 +69,100 @@ class BTree:
         if self.root_page_id is None:
             return []
         return self._search_all_node(self._load_node(self.root_page_id), key)
+    
+    def range_search(self, start_key: Any, end_key: Any, 
+                     include_start: bool = True, include_end: bool = True) -> List[Tuple[int, int]]:
+        """
+        Phase 3: Search for all keys in a range [start_key, end_key].
+        
+        Uses leaf node linking to efficiently traverse the range without
+        traversing the entire tree for each key.
+        
+        Args:
+            start_key: Start of range (None = -infinity)
+            end_key: End of range (None = +infinity)
+            include_start: Whether to include start_key (>= vs >)
+            include_end: Whether to include end_key (<= vs <)
+            
+        Returns:
+            List of (page_id, row_id) tuples for all keys in range
+        """
+        if self.root_page_id is None:
+            return []
+        
+        results = []
+        
+        # Find the starting leaf node
+        if start_key is None:
+            # Start from leftmost leaf
+            current_node = self._find_leftmost_leaf()
+        else:
+            current_node = self._find_leaf_for_key(start_key)
+        
+        # Traverse leaves using next_leaf_page_id links
+        while current_node is not None:
+            # Collect matching keys from current leaf
+            for i, key in enumerate(current_node.keys):
+                # Check if key is in range
+                if start_key is not None:
+                    if include_start:
+                        if key < start_key:
+                            continue
+                    else:
+                        if key <= start_key:
+                            continue
+                
+                if end_key is not None:
+                    if include_end:
+                        if key > end_key:
+                            # We've gone past the range, stop
+                            return results
+                    else:
+                        if key >= end_key:
+                            return results
+                
+                # Key is in range, add its value
+                results.append(current_node.values[i])
+            
+            # Move to next leaf
+            if current_node.next_leaf_page_id is not None:
+                current_node = self._load_node(current_node.next_leaf_page_id)
+            else:
+                break
+        
+        return results
+    
+    def _find_leftmost_leaf(self) -> Optional[BTreeNode]:
+        """Find the leftmost (smallest key) leaf node."""
+        if self.root_page_id is None:
+            return None
+        
+        node = self._load_node(self.root_page_id)
+        while not node.is_leaf:
+            if len(node.children) > 0:
+                node = self._load_node(node.children[0])
+            else:
+                return None
+        return node
+    
+    def _find_leaf_for_key(self, key: Any) -> Optional[BTreeNode]:
+        """Find the leaf node that would contain the given key."""
+        if self.root_page_id is None:
+            return None
+        
+        node = self._load_node(self.root_page_id)
+        while not node.is_leaf:
+            # Find appropriate child
+            i = 0
+            while i < len(node.keys) and key >= node.keys[i]:
+                i += 1
+            
+            if i < len(node.children):
+                node = self._load_node(node.children[i])
+            else:
+                return None
+        
+        return node
 
     def delete(self, key: Any) -> bool:
         """Delete a key from the B-Tree."""
@@ -75,6 +170,42 @@ class BTree:
             return False
         # TODO: Implement delete - for now just return False
         # Delete is complex and can be deferred
+        return False
+    
+    def delete_entry(self, key: Any, value: Tuple[int, int]) -> bool:
+        """
+        Phase 3: Delete a specific (key, value) pair from the B-Tree.
+        
+        This is a simplified deletion that doesn't rebalance the tree.
+        Good enough for incremental index maintenance without full rebuild.
+        
+        Args:
+            key: Key to delete
+            value: Specific (page_id, row_id) pair to remove
+            
+        Returns:
+            True if entry was found and deleted, False otherwise
+        """
+        if self.root_page_id is None:
+            return False
+        
+        # Find the leaf node containing this key
+        leaf = self._find_leaf_for_key(key)
+        if leaf is None:
+            return False
+        
+        # Find the exact (key, value) pair in this leaf
+        for i in range(len(leaf.keys)):
+            if leaf.keys[i] == key and leaf.values[i] == value:
+                # Found it! Remove the entry
+                del leaf.keys[i]
+                del leaf.values[i]
+                
+                # Save the modified leaf
+                self._save_node(leaf)
+                return True
+        
+        # Entry not found
         return False
     
     def _search_node(self, node: BTreeNode, key: Any) -> Optional[Tuple[int, int]]:
@@ -151,6 +282,7 @@ class BTree:
         Format:
         - 1 byte: is_leaf flag (1 for leaf, 0 for internal)
         - 2 bytes: number of keys
+        - 4 bytes: next_leaf_page_id (or -1 if None) - for Phase 3 range scans
         - Pickled keys list
         - Pickled values list (for leaf nodes)
         - Pickled children list (for internal nodes)
@@ -162,6 +294,10 @@ class BTree:
         
         # Number of keys
         parts.append(struct.pack('<H', len(node.keys)))
+        
+        # Next leaf page ID (for range scans)
+        next_leaf = node.next_leaf_page_id if node.next_leaf_page_id is not None else -1
+        parts.append(struct.pack('<i', next_leaf))
         
         # Pickle keys, values, and children
         keys_bytes = pickle.dumps(node.keys)
@@ -195,6 +331,13 @@ class BTree:
         num_keys = struct.unpack('<H', data[offset:offset+2])[0]
         offset += 2
         
+        # Next leaf page ID (Phase 3 range scans) - handle backward compatibility
+        next_leaf = None
+        if len(data) > offset + 4:
+            next_leaf_id = struct.unpack('<i', data[offset:offset+4])[0]
+            offset += 4
+            next_leaf = next_leaf_id if next_leaf_id != -1 else None
+        
         # Deserialize keys
         keys_len = struct.unpack('<I', data[offset:offset+4])[0]
         offset += 4
@@ -204,6 +347,7 @@ class BTree:
         # Create node
         node = BTreeNode(is_leaf=is_leaf, order=self.order)
         node.keys = keys
+        node.next_leaf_page_id = next_leaf
         
         # Deserialize values (leaf) or children (internal)
         if is_leaf:
@@ -269,6 +413,11 @@ class BTree:
             # Split values
             new_node.values = full_child.values[mid_index:]
             full_child.values = full_child.values[:mid_index]
+            
+            # Phase 3: Link leaf nodes for range scans
+            # new_node inherits the old next pointer, full_child points to new_node
+            new_node.next_leaf_page_id = full_child.next_leaf_page_id
+            # We'll set full_child.next_leaf_page_id after saving new_node (need its page_id)
         else:
             # Move mid key (remove from child)
             mid_key = full_child.keys[mid_index]
@@ -279,9 +428,15 @@ class BTree:
             new_node.children = full_child.children[mid_index + 1:]
             full_child.children = full_child.children[:mid_index + 1]
         
-        # Save both nodes
-        self._save_node(full_child)
+        # Save new node first to get its page_id
         new_node_id = self._save_node(new_node)
+        
+        # Phase 3: Update leaf linking
+        if full_child.is_leaf:
+            full_child.next_leaf_page_id = new_node_id
+        
+        # Save full_child with updated next pointer
+        self._save_node(full_child)
         
         # Insert mid key into parent
         parent.keys.insert(index, mid_key)
