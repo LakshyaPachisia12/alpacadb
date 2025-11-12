@@ -147,12 +147,12 @@ class IndexManager:
     def delete_entry(self, table_name: str, column_values: Dict[str, Any],
                     page_id: int, row_id: int) -> None:
         """
-        Delete entries from all indexes for a table.
+        Delete specific entries from all indexes for a table.
         
         Args:
             table_name: Name of the table
             column_values: Dict of column name to value
-            page_id: Page ID where row was
+            page_id: Page ID where row was deleted
             row_id: Row ID within page
         """
         indexes = self.catalog.get_indexes_for_table(table_name)
@@ -161,7 +161,8 @@ class IndexManager:
                 btree = self.get_btree(index.index_name)
                 if btree:
                     key = column_values[index.column_name]
-                    btree.delete(key)
+                    # Delete specific (key, value) pair to handle duplicates correctly
+                    btree.delete(key, value=(page_id, row_id))
     
     def search_index(self, index_name: str, key: Any) -> Optional[Tuple[int, int]]:
         """
@@ -194,6 +195,32 @@ class IndexManager:
         btree = self.get_btree(index_name)
         if btree:
             return btree.search_all(key)
+        return []
+    
+    def range_scan_index(self, index_name: str, min_key: Optional[Any] = None, 
+                        max_key: Optional[Any] = None, min_inclusive: bool = True,
+                        max_inclusive: bool = True) -> List[Tuple[int, int]]:
+        """
+        Perform a range scan on an index.
+        
+        Args:
+            index_name: Name of the index to scan
+            min_key: Minimum key (None for no lower bound)
+            max_key: Maximum key (None for no upper bound)
+            min_inclusive: Include min_key (True for >=, False for >)
+            max_inclusive: Include max_key (True for <=, False for <)
+            
+        Returns:
+            List of (page_id, row_id) tuples for all keys in range
+            
+        Examples:
+            range_scan_index('idx_age', 18, 65) -> age >= 18 AND age <= 65
+            range_scan_index('idx_price', 100, None) -> price >= 100
+            range_scan_index('idx_date', None, '2025-01-01') -> date <= '2025-01-01'
+        """
+        btree = self.get_btree(index_name)
+        if btree:
+            return btree.range_scan(min_key, max_key, min_inclusive, max_inclusive)
         return []
     
     def _free_btree_pages(self, root_page_id: Optional[int]) -> None:
