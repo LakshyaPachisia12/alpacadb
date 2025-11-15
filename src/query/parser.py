@@ -80,6 +80,14 @@ class Parser:
         elif self._check(TokenType.DROP):
             self._consume(TokenType.DROP)
             return self._drop_statement()
+        
+        # EXPLAIN statement
+        elif self._check(TokenType.EXPLAIN):
+            self._consume(TokenType.EXPLAIN)
+            self._consume(TokenType.SELECT)
+            select_node = self._select_statement()
+            select_node.is_explain = True
+            return select_node
             
         # DML statements
         elif self._check(TokenType.SELECT):

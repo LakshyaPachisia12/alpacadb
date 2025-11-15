@@ -29,6 +29,7 @@ class TokenType(Enum):
     INSERT = auto()
     UPDATE = auto()
     DELETE = auto()
+    EXPLAIN = auto()
     
     # Aggregate Functions
     COUNT = auto()
@@ -155,6 +156,7 @@ KEYWORDS = {
     'INSERT': TokenType.INSERT,
     'UPDATE': TokenType.UPDATE,
     'DELETE': TokenType.DELETE,
+    'EXPLAIN': TokenType.EXPLAIN,
     'COUNT': TokenType.COUNT,
     'SUM': TokenType.SUM,
     'AVG': TokenType.AVG,

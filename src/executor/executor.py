@@ -79,6 +79,17 @@ class QueryExecutor:
                 ↓
             IndexScanOperator OR ScanOperator (FROM table - chosen by optimizer)
         """
+        # Handle EXPLAIN query
+        if hasattr(node, 'is_explain') and node.is_explain:
+            if self.optimizer:
+                plan = self.optimizer.optimize(node)
+                explanation = self.optimizer.explain(plan)
+                cost = self.optimizer.estimate_cost(plan)
+                # Return explanation as a single row with one column
+                return [[explanation + f"\n\n💰 Estimated Cost: {cost:.2f}"]], ['Query Plan']
+            else:
+                return [["Optimizer not available"]], ['Query Plan']
+        
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:

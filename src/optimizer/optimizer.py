@@ -70,6 +70,9 @@ class QueryOptimizer:
         """
         Optimize a SELECT query and return an execution plan.
         
+        Uses cost-based optimization: compares SeqScan vs IndexScan costs
+        and chooses the cheaper option.
+        
         Args:
             select_node: Parsed SELECT AST node
             
@@ -79,35 +82,44 @@ class QueryOptimizer:
         table_name = select_node.table_name
         where_clause = select_node.where_clause
         
-        # Rule 1: If no WHERE clause or no index_manager, use SeqScan
-        if not where_clause or not self.index_manager:
-            return QueryPlan(
-                plan_type='SeqScan',
-                table_name=table_name,
-                full_predicate=where_clause
-            )
+        # Always create a SeqScan plan as fallback
+        seqscan_plan = QueryPlan(
+            plan_type='SeqScan',
+            table_name=table_name,
+            full_predicate=where_clause
+        )
         
-        # Rule 2: Try to find a simple equality predicate on an indexed column
+        # If no WHERE clause or no index_manager, must use SeqScan
+        if not where_clause or not self.index_manager:
+            return seqscan_plan
+        
+        # Try to find a simple equality predicate on an indexed column
         index_opportunity = self._find_index_opportunity(table_name, where_clause)
         
         if index_opportunity:
-            # Found an index we can use!
+            # Found an index we can use - create IndexScan plan
             index_name, column_name, search_key = index_opportunity
-            return QueryPlan(
+            indexscan_plan = QueryPlan(
                 plan_type='IndexScan',
                 table_name=table_name,
                 index_name=index_name,
                 index_column=column_name,
                 search_key=search_key,
-                full_predicate=where_clause  # Still keep full predicate for additional filters
+                full_predicate=where_clause
             )
+            
+            # COST-BASED DECISION: Compare costs and pick cheaper plan
+            seqscan_cost = self.estimate_cost(seqscan_plan)
+            indexscan_cost = self.estimate_cost(indexscan_plan)
+            
+            # Choose the plan with lower cost
+            if indexscan_cost < seqscan_cost:
+                return indexscan_plan
+            else:
+                return seqscan_plan
         
-        # Rule 3: No usable index, fall back to SeqScan
-        return QueryPlan(
-            plan_type='SeqScan',
-            table_name=table_name,
-            full_predicate=where_clause
-        )
+        # No usable index, use SeqScan
+        return seqscan_plan
     
     def _find_index_opportunity(self, table_name: str, predicate: BinaryOp) -> Optional[tuple]:
         """

@@ -199,6 +199,7 @@ class SelectNode(ASTNode):
     order_by: Optional[tuple] = None  # (column, 'ASC'|'DESC')
     join_clause: Optional['JoinClause'] = None
     aggregates: List[AggregateFunction] = field(default_factory=list)  # For backward compatibility, aggregates can also be in columns
+    is_explain: bool = False  # Whether this is an EXPLAIN query
     
     def __repr__(self):
         cols = ', '.join(self.columns)
