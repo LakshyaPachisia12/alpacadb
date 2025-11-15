@@ -5,7 +5,7 @@ Converts AST nodes into physical operator trees and executes them.
 """
 
 from typing import List, Any, Optional, Tuple
-from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator, NestedLoopJoinOperator
+from .operators import PhysicalOperator, ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator, NestedLoopJoinOperator
 from ..query.ast_nodes import (
     SelectNode,
     InsertNode,
@@ -141,6 +141,12 @@ class QueryExecutor:
         # Build the base operator tree (scans + joins)
         base_operator, all_column_names = self._build_base_operator_tree(node)
         current_operator = base_operator
+        
+        # Set last_plan for testing/debugging
+        if node.joins:
+            self.last_plan = 'Join'
+        else:
+            self.last_plan = 'SeqScan'  # Default for non-optimized queries
 
         # 2. Filter Operator (WHERE clause)
         # Note: Even with IndexScan, we still apply the full predicate

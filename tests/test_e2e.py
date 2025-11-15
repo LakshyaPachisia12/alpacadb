@@ -463,6 +463,56 @@ class TestE2EErrorHandling:
         rows, _ = self._execute_sql(executor, "SELECT * FROM test WHERE id = 1;")
         assert len(rows) == 1
         assert executor.last_plan == 'SeqScan'
+    
+    def test_inner_join_basic(self, temp_db):
+        """Test basic INNER JOIN functionality."""
+        executor = temp_db['executor']
+        
+        # Create users table
+        self._execute_sql(executor, """
+        CREATE TABLE users (
+            id INT,
+            name STRING
+        );
+        """)
+        
+        # Create orders table
+        self._execute_sql(executor, """
+        CREATE TABLE orders (
+            id INT,
+            user_id INT,
+            product STRING
+        );
+        """)
+        
+        # Insert test data
+        self._execute_sql(executor, "INSERT INTO users VALUES (1, 'Alice');")
+        self._execute_sql(executor, "INSERT INTO users VALUES (2, 'Bob');")
+        self._execute_sql(executor, "INSERT INTO users VALUES (3, 'Charlie');")
+        
+        self._execute_sql(executor, "INSERT INTO orders VALUES (1, 1, 'Laptop');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (2, 1, 'Mouse');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (3, 2, 'Keyboard');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (4, 99, 'Monitor');")  # No matching user
+        
+        # Test INNER JOIN
+        rows, columns = self._execute_sql(executor, 
+            "SELECT users.name, orders.product FROM users INNER JOIN orders ON users.id = orders.user_id;")
+        
+        # Should have 3 rows (orders 1, 2, 3 match users 1, 1, 2)
+        assert len(rows) == 3
+        assert columns == ['name', 'product']
+        
+        # Check the results
+        results = [(row[0], row[1]) for row in rows]
+        expected = [
+            ('Alice', 'Laptop'),
+            ('Alice', 'Mouse'), 
+            ('Bob', 'Keyboard')
+        ]
+        assert sorted(results) == sorted(expected)
+        
+        assert executor.last_plan == 'Join'
 
 
 if __name__ == '__main__':
