@@ -2,7 +2,6 @@
 Integration tests for parser with storage engine.
 """
 
-import os
 import pytest
 from src.storage import PageManager, Catalog, TableManager
 from src.query import Lexer, Parser
