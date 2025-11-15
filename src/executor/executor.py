@@ -80,6 +80,10 @@ class QueryExecutor:
         
         main_columns = [col['name'].lower() for col in main_table_schema.columns]
         
+        # Create qualified column names for the main table
+        main_table_alias = node.alias or node.table_name
+        qualified_main_columns = [f"{main_table_alias}.{col}" for col in main_columns]
+        
         # Create scan for main table
         main_scan = ScanOperator(
             table_manager=self.table_manager,
@@ -88,7 +92,7 @@ class QueryExecutor:
         )
         
         current_operator = main_scan
-        all_columns = main_columns.copy()
+        all_columns = qualified_main_columns.copy()
         
         # Apply joins sequentially (left-deep join tree)
         for join_clause in node.joins:
@@ -98,6 +102,10 @@ class QueryExecutor:
                 raise TableNotFoundError(join_clause.table_name)
             
             join_columns = [col['name'].lower() for col in join_table_schema.columns]
+            
+            # Create qualified column names for the joined table
+            table_alias = join_clause.alias or join_clause.table_name
+            qualified_join_columns = [f"{table_alias}.{col}" for col in join_columns]
             
             # Create scan for joined table
             join_scan = ScanOperator(
@@ -113,11 +121,11 @@ class QueryExecutor:
                 join_type=join_clause.join_type,
                 join_condition=join_clause.on_condition,
                 left_columns=all_columns,
-                right_columns=join_columns,
+                right_columns=qualified_join_columns,
             )
             
-            # Update column list
-            all_columns.extend(join_columns)
+            # Update column list with qualified names
+            all_columns.extend(qualified_join_columns)
         
         return current_operator, all_columns
 
@@ -232,7 +240,8 @@ class QueryExecutor:
             if "*" in (node.columns or ["*"]):
                 output_columns = all_column_names
             else:
-                output_columns = [col.lower() for col in (node.columns or [])]
+                # Map qualified names like 'users.name' to final output labels 'name'
+                output_columns = [col.lower().split('.')[-1] for col in (node.columns or [])]
 
         return results, output_columns
 

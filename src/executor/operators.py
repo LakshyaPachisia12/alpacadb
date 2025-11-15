@@ -670,8 +670,8 @@ class NestedLoopJoinOperator(PhysicalOperator):
             right_child: Right input operator
             join_type: 'INNER', 'LEFT', 'RIGHT', 'FULL', 'CROSS'
             join_condition: AST node for join condition (None for CROSS JOIN)
-            left_columns: Column names from left side
-            right_columns: Column names from right side
+            left_columns: Column names from left side (qualified)
+            right_columns: Column names from right side (qualified)
         """
         super().__init__()
         self.left_child = left_child
@@ -681,7 +681,7 @@ class NestedLoopJoinOperator(PhysicalOperator):
         self.left_columns = left_columns or []
         self.right_columns = right_columns or []
         
-        # For evaluation
+        # For evaluation - combine qualified column names
         self.all_columns = self.left_columns + self.right_columns
         
         # Buffers for different join types
@@ -829,28 +829,49 @@ class NestedLoopJoinOperator(PhysicalOperator):
                     raise ExecutionError(f"Unknown operator in join condition: {op}")
 
             elif isinstance(node, ColumnRef):
-                # Handle qualified column names (table.column)
+                # Handle qualified or unqualified column names (table.column or column)
                 col_name = node.name.lower()
+
+                # Quick exact match for fully qualified or plain names
+                if col_name in self.all_columns:
+                    idx = self.all_columns.index(col_name)
+                    return row[idx]
+
+                # If name is qualified but not present, try matching by the unqualified part
                 if '.' in col_name:
-                    # Qualified name - find in combined column list
-                    try:
-                        col_idx = self.all_columns.index(col_name)
-                        return row[col_idx]
-                    except ValueError:
+                    unqual = col_name.split('.')[-1]
+                    matches = [i for i, c in enumerate(self.all_columns) if c.endswith('.' + unqual)]
+                    if len(matches) == 1:
+                        return row[matches[0]]
+                    elif len(matches) > 1:
+                        raise ColumnNotFoundError(
+                            col_name,
+                            hint=(
+                                f"Ambiguous column '{col_name}'. Matches found: {', '.join(self.all_columns[i] for i in matches)}"
+                            ),
+                        )
+                    else:
                         raise ColumnNotFoundError(
                             col_name,
                             hint=f"Qualified column '{col_name}' not found. Available: {', '.join(self.all_columns)}"
                         )
+
+                # Unqualified name - check suffix matches against qualified list
+                matches = [i for i, c in enumerate(self.all_columns) if c.endswith('.' + col_name) or c == col_name]
+                if len(matches) == 1:
+                    return row[matches[0]]
+                elif len(matches) > 1:
+                    raise ColumnNotFoundError(
+                        col_name,
+                        hint=(
+                            f"Ambiguous column '{col_name}'. Matches found: {', '.join(self.all_columns[i] for i in matches)}"
+                        ),
+                    )
                 else:
-                    # Unqualified name - ambiguous, but try to find it
-                    try:
-                        col_idx = self.all_columns.index(col_name)
-                        return row[col_idx]
-                    except ValueError:
-                        raise ColumnNotFoundError(
-                            col_name,
-                            hint=f"Column '{col_name}' not found. Available: {', '.join(self.all_columns)}"
-                        )
+                    raise ColumnNotFoundError(
+                        col_name,
+                        hint=f"Column '{col_name}' not found. Available: {', '.join(self.all_columns)}"
+                    )
 
             elif isinstance(node, Literal):
                 return node.value
