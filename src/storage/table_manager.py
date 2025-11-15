@@ -76,6 +76,8 @@ class TableManager:
             # First insert for this table - allocate initial page
             page = self.page_manager.allocate_page()
             schema.first_page_id = page.page_id
+            # Update stats: first data page allocated
+            schema.num_pages = 1
             self.catalog._save_catalog()  # Update catalog
         else:
             # Find last page in chain
@@ -89,6 +91,9 @@ class TableManager:
             self.page_manager.write_page(page)  # Update old page with link
 
             page = new_page
+            # Update stats for additional page
+            schema.num_pages += 1
+            self.catalog._save_catalog()
             page.add_record(row_bytes)  # Add to new page
 
         # Step 6: Write page to disk
@@ -106,6 +111,10 @@ class TableManager:
             
             # Insert into all relevant indexes
             self.index_manager.insert_entry(table_name, column_values, page.page_id, row_id)
+
+        # Update table stats for new row
+        schema.num_rows += 1
+        self.catalog._save_catalog()
 
         print(f"✅ Inserted row into '{table_name}': {values}")
         return True
@@ -353,4 +362,7 @@ class TableManager:
 
         # Update catalog with new first page
         schema.first_page_id = first_page.page_id
+        # Reset stats: 0 rows, 1 allocated page
+        schema.num_rows = 0
+        schema.num_pages = 1
         self.catalog._save_catalog()
