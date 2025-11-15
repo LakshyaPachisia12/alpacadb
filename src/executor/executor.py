@@ -5,7 +5,7 @@ Converts AST nodes into physical operator trees and executes them.
 """
 
 from typing import List, Any, Optional, Tuple
-from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator
+from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator, NestedLoopJoinOperator
 from ..query.ast_nodes import (
     SelectNode,
     InsertNode,
@@ -66,6 +66,61 @@ class QueryExecutor:
                 hint="This query type is not supported. Supported types: SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, CREATE INDEX, DROP INDEX."
             )
 
+    def _build_base_operator_tree(self, node: SelectNode) -> Tuple[PhysicalOperator, List[str]]:
+        """
+        Build the base operator tree for scans and joins.
+        
+        Returns:
+            (root_operator, all_column_names)
+        """
+        # Start with the main table
+        main_table_schema = self.catalog.get_table_schema(node.table_name)
+        if not main_table_schema:
+            raise TableNotFoundError(node.table_name)
+        
+        main_columns = [col['name'].lower() for col in main_table_schema.columns]
+        
+        # Create scan for main table
+        main_scan = ScanOperator(
+            table_manager=self.table_manager,
+            table_name=node.table_name,
+            column_names=main_columns,
+        )
+        
+        current_operator = main_scan
+        all_columns = main_columns.copy()
+        
+        # Apply joins sequentially (left-deep join tree)
+        for join_clause in node.joins:
+            # Get schema for joined table
+            join_table_schema = self.catalog.get_table_schema(join_clause.table_name)
+            if not join_table_schema:
+                raise TableNotFoundError(join_clause.table_name)
+            
+            join_columns = [col['name'].lower() for col in join_table_schema.columns]
+            
+            # Create scan for joined table
+            join_scan = ScanOperator(
+                table_manager=self.table_manager,
+                table_name=join_clause.table_name,
+                column_names=join_columns,
+            )
+            
+            # Create join operator
+            current_operator = NestedLoopJoinOperator(
+                left_child=current_operator,
+                right_child=join_scan,
+                join_type=join_clause.join_type,
+                join_condition=join_clause.on_condition,
+                left_columns=all_columns,
+                right_columns=join_columns,
+            )
+            
+            # Update column list
+            all_columns.extend(join_columns)
+        
+        return current_operator, all_columns
+
     def _execute_select(self, node: SelectNode) -> Tuple[List[List[Any]], List[str]]:
         """
         Execute a SELECT query by building an operator tree.
@@ -81,58 +136,11 @@ class QueryExecutor:
         """
         # Handle EXPLAIN query
         if hasattr(node, 'is_explain') and node.is_explain:
-            if self.optimizer:
-                plan = self.optimizer.optimize(node)
-                explanation = self.optimizer.explain(plan)
-                cost = self.optimizer.estimate_cost(plan)
-                # Return explanation as a single row with one column
-                return [[explanation + f"\n\n💰 Estimated Cost: {cost:.2f}"]], ['Query Plan']
-            else:
-                return [["Optimizer not available"]], ['Query Plan']
+            return [["EXPLAIN not yet implemented for joins"]], ['Query Plan']
         
-        # Get table schema
-        table_schema = self.catalog.get_table_schema(node.table_name)
-        if not table_schema:
-            raise TableNotFoundError(node.table_name)
-
-        # Extract column names from schema
-        all_column_names = [col['name'].lower() for col in table_schema.columns]
-
-        # Build operator tree from bottom up
-
-        # 1. Base Scan Operator (leaf node) - use optimizer if available
-        if self.optimizer:
-            # Ask optimizer for execution plan
-            plan = self.optimizer.optimize(node)
-            self.last_plan = plan.plan_type  # Store for testing/debugging
-            
-            if plan.plan_type == 'IndexScan':
-                # Use IndexScan for point lookup
-                scan = IndexScanOperator(
-                    table_manager=self.table_manager,
-                    index_manager=self.index_manager,
-                    table_name=node.table_name,
-                    index_name=plan.index_name,
-                    key=plan.search_key,
-                    column_names=all_column_names,
-                )
-            else:
-                # Fall back to sequential scan
-                scan = ScanOperator(
-                    table_manager=self.table_manager,
-                    table_name=node.table_name,
-                    column_names=all_column_names,
-                )
-        else:
-            # No optimizer - use sequential scan
-            self.last_plan = 'SeqScan'
-            scan = ScanOperator(
-                table_manager=self.table_manager,
-                table_name=node.table_name,
-                column_names=all_column_names,
-            )
-
-        current_operator = scan
+        # Build the base operator tree (scans + joins)
+        base_operator, all_column_names = self._build_base_operator_tree(node)
+        current_operator = base_operator
 
         # 2. Filter Operator (WHERE clause)
         # Note: Even with IndexScan, we still apply the full predicate
@@ -213,10 +221,12 @@ class QueryExecutor:
                 else:
                     col_name = agg.column if agg.column else '*'
                     output_columns.append(f"{agg.func_name}({col_name})")
-        elif "*" in (node.columns or ["*"]):
-            output_columns = all_column_names
         else:
-            output_columns = [col.lower() for col in (node.columns or [])]
+            # For regular queries, use selected columns or all columns
+            if "*" in (node.columns or ["*"]):
+                output_columns = all_column_names
+            else:
+                output_columns = [col.lower() for col in (node.columns or [])]
 
         return results, output_columns
 

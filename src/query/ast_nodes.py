@@ -187,18 +187,20 @@ class DeleteNode(ASTNode):
 @dataclass
 class SelectNode(ASTNode):
     """
-    Represents: SELECT columns FROM table WHERE condition GROUP BY cols HAVING condition ORDER BY column
+    Represents: SELECT columns FROM table [JOIN ...] [WHERE condition] [GROUP BY cols] [HAVING condition] [ORDER BY column]
     
     Example:
-        SELECT department, COUNT(*) FROM employees GROUP BY department HAVING COUNT(*) > 5 ORDER BY department
+        SELECT u.name, o.total FROM users u INNER JOIN orders o ON u.id = o.user_id WHERE u.age > 18
     """
     columns: List[str]  # ['*'] or ['id', 'name'] or can include aggregate functions
     table_name: str
     where_clause: Optional['BinaryOp'] = None
     group_by: Optional['GroupByNode'] = None
     order_by: Optional[tuple] = None  # (column, 'ASC'|'DESC')
-    join_clause: Optional['JoinClause'] = None
-    aggregates: List[AggregateFunction] = field(default_factory=list)  # For backward compatibility, aggregates can also be in columns
+    join_clause: Optional['JoinClause'] = None  # For backward compatibility
+    aggregates: List['AggregateFunction'] = field(default_factory=list)
+    alias: Optional[str] = None
+    joins: List['JoinClause'] = field(default_factory=list)  # New: multiple joins
     is_explain: bool = False  # Whether this is an EXPLAIN query
     
     def __repr__(self):
@@ -253,17 +255,23 @@ class Literal:
 @dataclass
 class JoinClause:
     """
-    Represents: INNER JOIN table ON condition
+    Represents join clauses: [INNER|LEFT|RIGHT|FULL|CROSS] JOIN table [AS alias] [ON condition]
     
-    Example:
+    Examples:
         INNER JOIN orders ON users.id = orders.user_id
+        LEFT JOIN orders o ON users.id = o.user_id
+        CROSS JOIN products
+        FULL OUTER JOIN categories c ON p.category_id = c.id
     """
-    join_type: str  # 'INNER' (only type supported in v1.0)
+    join_type: str  # 'INNER', 'LEFT', 'RIGHT', 'FULL', 'CROSS'
     table_name: str
-    on_condition: BinaryOp
+    alias: Optional[str] = None
+    on_condition: Optional[BinaryOp] = None  # None for CROSS JOIN
     
     def __repr__(self):
-        return f"{self.join_type} JOIN {self.table_name} ON {self.on_condition}"
+        alias_str = f" AS {self.alias}" if self.alias else ""
+        on_str = f" ON {self.on_condition}" if self.on_condition else ""
+        return f"{self.join_type} JOIN {self.table_name}{alias_str}{on_str}"
 
 
 # ==================== Transaction Nodes ====================
