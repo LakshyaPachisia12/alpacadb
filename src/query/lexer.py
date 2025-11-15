@@ -6,11 +6,7 @@ Converts raw SQL-like text into a stream of tokens.
 
 from typing import List
 from .tokens import Token, TokenType, KEYWORDS
-
-
-class LexerError(Exception):
-    """Raised when lexer encounters invalid syntax."""
-    pass
+from ..errors import LexerError
 
 
 class Lexer:
@@ -108,7 +104,12 @@ class Lexer:
             if self._match('='):
                 self._add_token(TokenType.NOT_EQUALS)
             else:
-                raise LexerError(f"Unexpected character '!' at line {self.line}, column {self.column}")
+                raise LexerError(
+                    f"Unexpected character '!' at line {self.line}, column {self.column}",
+                    hint="Did you mean '!=' (not equal)?",
+                    token="!",
+                    context=f"Line {self.line}, Column {self.column}"
+                )
         elif char == '<':
             if self._match('='):
                 self._add_token(TokenType.LESS_EQUAL)
@@ -133,7 +134,12 @@ class Lexer:
             self._identifier()
         
         else:
-            raise LexerError(f"Unexpected character '{char}' at line {self.line}, column {self.column}")
+            raise LexerError(
+                f"Unexpected character '{char}' at line {self.line}, column {self.column}",
+                hint="Invalid character in SQL query. Check for typos or unsupported characters.",
+                token=char,
+                context=f"Line {self.line}, Column {self.column}"
+            )
     
     def _string_literal(self, quote_char: str):
         """Parse string literal enclosed in quotes."""
@@ -160,7 +166,12 @@ class Lexer:
                 value += self._advance()
         
         if self._is_at_end():
-            raise LexerError(f"Unterminated string at line {self.line}")
+            raise LexerError(
+                f"Unterminated string literal starting at line {self.line}",
+                hint=f"String must be closed with '{quote_char}'. Did you forget the closing quote?",
+                token=quote_char,
+                context=f"Line {self.line}"
+            )
         
         # Consume closing quote
         self._advance()

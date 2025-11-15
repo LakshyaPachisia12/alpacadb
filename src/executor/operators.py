@@ -9,6 +9,7 @@ These operators use the Volcano/Iterator model:
 
 from typing import List, Optional, Any, Iterator
 from abc import ABC, abstractmethod
+from ..errors import ExecutionError, ColumnNotFoundError
 
 
 class ReverseCompare:
@@ -102,6 +103,9 @@ class ScanOperator(PhysicalOperator):
     def next(self) -> Optional[List[Any]]:
         if not self._opened:
             raise RuntimeError("Operator not opened")
+        
+        if self._iterator is None:
+            return None
 
         try:
             return next(self._iterator)
@@ -179,7 +183,10 @@ class FilterOperator(PhysicalOperator):
                 elif op == "OR":
                     return left or right
                 else:
-                    raise ValueError(f"Unknown operator: {op}")
+                    raise ExecutionError(
+                        f"Unknown operator: {op}",
+                        hint=f"Supported operators: =, !=, <, >, <=, >=, AND, OR. Got: {op}"
+                    )
 
             elif isinstance(node, ColumnRef):
                 # Find column index and return value from row
@@ -188,13 +195,20 @@ class FilterOperator(PhysicalOperator):
                     col_idx = self.column_names.index(col_name)
                     return row[col_idx]
                 except ValueError:
-                    raise ValueError(f"Unknown column: {col_name}")
+                    # Find table name if available (for better error message)
+                    raise ColumnNotFoundError(
+                        col_name,
+                        hint=f"Column '{col_name}' not found in table. Available columns: {', '.join(self.column_names)}"
+                    )
 
             elif isinstance(node, Literal):
                 return node.value
 
             else:
-                raise ValueError(f"Unknown node type in predicate: {type(node)}")
+                raise ExecutionError(
+                    f"Unknown node type in predicate: {type(node).__name__}",
+                    hint="Predicates can only contain column references, literals, and binary operations."
+                )
 
         return evaluate(self.predicate)
 
@@ -234,7 +248,10 @@ class ProjectOperator(PhysicalOperator):
                     idx = input_columns.index(col_lower)
                     self.column_indices.append(idx)
                 except ValueError:
-                    raise ValueError(f"Unknown column: {col}")
+                    raise ColumnNotFoundError(
+                        col,
+                        hint=f"Column '{col}' not found. Available columns: {', '.join(input_columns)}"
+                    )
 
     def open(self):
         super().open()
@@ -304,7 +321,7 @@ class SortOperator(PhysicalOperator):
 
         # Build sort key function with proper DESC handling
         def sort_key(row):
-            keys = []
+            keys: List[Any] = []
             for col_name, is_desc in self.order_by_columns:
                 col_idx = self.column_names.index(col_name.lower())
                 value = row[col_idx]
@@ -337,6 +354,9 @@ class SortOperator(PhysicalOperator):
     def next(self) -> Optional[List[Any]]:
         if not self._opened:
             raise RuntimeError("Operator not opened")
+        
+        if self._iterator is None:
+            return None
 
         try:
             return next(self._iterator)
@@ -430,14 +450,14 @@ class AggregateOperator(PhysicalOperator):
     Handles GROUP BY and aggregate functions like COUNT, SUM, AVG, MIN, MAX.
     """
 
-    def __init__(self, child: PhysicalOperator, aggregates: List, group_by_columns: List[str] = None, 
-                 having_predicate=None, column_names: List[str] = None):
+    def __init__(self, child: PhysicalOperator, aggregates: List, group_by_columns: Optional[List[str]] = None, 
+                 having_predicate=None, column_names: Optional[List[str]] = None):
         super().__init__()
         self.child = child
         self.aggregates = aggregates  # List of AggregateFunction AST nodes
-        self.group_by_columns = group_by_columns or []  # Column names to group by
+        self.group_by_columns = group_by_columns if group_by_columns is not None else []  # Column names to group by
         self.having_predicate = having_predicate  # HAVING condition
-        self.column_names = column_names or []  # For evaluating HAVING predicates
+        self.column_names = column_names if column_names is not None else []  # For evaluating HAVING predicates
         self._results = []
         self._current_idx = 0
 
@@ -493,7 +513,10 @@ class AggregateOperator(PhysicalOperator):
                     idx = self.column_names.index(col_name.lower())
                     group_indices.append(idx)
                 except ValueError:
-                    raise ValueError(f"Unknown GROUP BY column: {col_name}")
+                    raise ColumnNotFoundError(
+                        col_name,
+                        hint=f"Column '{col_name}' in GROUP BY not found. Available columns: {', '.join(self.column_names)}"
+                    )
             
             for row in rows:
                 key = tuple(row[i] for i in group_indices)
@@ -504,7 +527,7 @@ class AggregateOperator(PhysicalOperator):
         # Apply aggregates to each group
         results = []
         for group_key, group_rows in groups.items():
-            result_row = list(group_key)  # Start with GROUP BY columns
+            result_row: List[Any] = list(group_key)  # Start with GROUP BY columns
             
             # Apply each aggregate function
             for agg in self.aggregates:
@@ -532,7 +555,10 @@ class AggregateOperator(PhysicalOperator):
                     values = [row[col_idx] for row in group_rows if row[col_idx] is not None]
                     value = max(values) if values else None
                 else:
-                    raise ValueError(f"Unknown aggregate function: {agg.func_name}")
+                    raise ExecutionError(
+                        f"Unknown aggregate function: {agg.func_name}",
+                        hint="Supported aggregate functions: COUNT, SUM, AVG, MIN, MAX."
+                    )
                 
                 result_row.append(value)
             
@@ -581,7 +607,10 @@ class AggregateOperator(PhysicalOperator):
                 elif op == "OR":
                     return left or right
                 else:
-                    raise ValueError(f"Unknown operator in HAVING: {op}")
+                    raise ExecutionError(
+                        f"Unknown operator in HAVING clause: {op}",
+                        hint=f"Supported operators: =, !=, <, >, <=, >=, AND, OR. Got: {op}"
+                    )
 
             elif isinstance(node, ColumnRef):
                 # For HAVING, we can reference aggregate results by alias or column name
@@ -596,13 +625,19 @@ class AggregateOperator(PhysicalOperator):
                     # Check if it's an aggregate result (by position)
                     # This is a simplification - proper implementation would track aliases
                     pass
-                raise ValueError(f"Unknown column in HAVING: {col_name}")
+                raise ColumnNotFoundError(
+                    col_name,
+                    hint=f"Column '{col_name}' in HAVING clause not found. Use aggregate functions or GROUP BY columns."
+                )
 
             elif isinstance(node, Literal):
                 return node.value
 
             else:
-                raise ValueError(f"Unknown node type in HAVING: {type(node)}")
+                raise ExecutionError(
+                    f"Unknown node type in HAVING clause: {type(node).__name__}",
+                    hint="HAVING clauses can only contain column references, literals, and binary operations."
+                )
 
         return evaluate(self.having_predicate)
 

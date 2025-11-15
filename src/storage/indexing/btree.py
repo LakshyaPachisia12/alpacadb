@@ -220,6 +220,8 @@ class BTree:
     def _load_node(self, page_id: int) -> BTreeNode:
         """Load a node from disk."""
         page = self.page_manager.read_page(page_id)
+        if page is None:
+            raise ValueError(f"Failed to read page {page_id}")
         node = self._deserialize_node(page.records[0])  # Node stored in first record
         node.page_id = page_id
         return node
@@ -231,6 +233,8 @@ class BTree:
         if node.page_id is not None:
             # Update existing page
             page = self.page_manager.read_page(node.page_id)
+            if page is None:
+                raise ValueError(f"Failed to read page {node.page_id}")
             page.records = [node_bytes]
             self.page_manager.write_page(page)
             return node.page_id
@@ -319,6 +323,8 @@ class BTree:
                 # Split child first
                 self._split_child(node, i)
                 # Reload node after split
+                if node.page_id is None:
+                    raise ValueError("Node page_id is None after split")
                 node = self._load_node(node.page_id)
                 if key > node.keys[i]:
                     i += 1

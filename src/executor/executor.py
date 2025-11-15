@@ -15,6 +15,14 @@ from ..query.ast_nodes import (
     UpdateNode,
     DeleteNode,
 )
+from ..errors import (
+    ExecutionError,
+    TableNotFoundError,
+    ColumnNotFoundError,
+    InvalidSchemaError,
+    DuplicateTableError,
+    IndexNotFoundError,
+)
 from ..optimizer import QueryOptimizer
 
 
@@ -27,7 +35,7 @@ class QueryExecutor:
         self.table_manager = table_manager
         self.catalog = catalog
         self.index_manager = index_manager
-        self.optimizer = QueryOptimizer(catalog, index_manager) if index_manager else None
+        self.optimizer = QueryOptimizer(catalog, index_manager, table_manager) if index_manager else None
         self.last_plan = None  # For debugging/testing - stores last query plan type
 
     def execute(self, ast_node) -> Tuple[List[List[Any]], Optional[List[str]]]:
@@ -53,7 +61,10 @@ class QueryExecutor:
         elif isinstance(ast_node, DeleteNode):
             return self._execute_delete(ast_node)
         else:
-            raise ValueError(f"Unknown AST node type: {type(ast_node)}")
+            raise ExecutionError(
+                f"Unknown AST node type: {type(ast_node).__name__}",
+                hint="This query type is not supported. Supported types: SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, CREATE INDEX, DROP INDEX."
+            )
 
     def _execute_select(self, node: SelectNode) -> Tuple[List[List[Any]], List[str]]:
         """
@@ -71,7 +82,7 @@ class QueryExecutor:
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:
-            raise ValueError(f"Table '{node.table_name}' does not exist")
+            raise TableNotFoundError(node.table_name)
 
         # Extract column names from schema
         all_column_names = [col['name'].lower() for col in table_schema.columns]
@@ -242,7 +253,7 @@ class QueryExecutor:
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:
-            raise ValueError(f"Table '{node.table_name}' does not exist")
+            raise TableNotFoundError(node.table_name)
 
         all_column_names = [col['name'].lower() for col in table_schema.columns]
 
@@ -270,15 +281,21 @@ class QueryExecutor:
                 if filter_op._evaluate_predicate(row):
                     # Apply updates
                     for col_name, new_value in node.assignments:
-                        col_idx = all_column_names.index(col_name.lower())
-                        row[col_idx] = new_value
+                        try:
+                            col_idx = all_column_names.index(col_name.lower())
+                            row[col_idx] = new_value
+                        except ValueError:
+                            raise ColumnNotFoundError(col_name, node.table_name)
                     updated_count += 1
         else:
             # No WHERE clause - update all rows
             for row in all_rows:
                 for col_name, new_value in node.assignments:
-                    col_idx = all_column_names.index(col_name.lower())
-                    row[col_idx] = new_value
+                    try:
+                        col_idx = all_column_names.index(col_name.lower())
+                        row[col_idx] = new_value
+                    except ValueError:
+                        raise ColumnNotFoundError(col_name, node.table_name)
                 updated_count += 1
 
         # Clear table and re-insert (simple approach)
@@ -308,7 +325,7 @@ class QueryExecutor:
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:
-            raise ValueError(f"Table '{node.table_name}' does not exist")
+            raise TableNotFoundError(node.table_name)
 
         all_column_names = [col['name'].lower() for col in table_schema.columns]
 
@@ -358,7 +375,10 @@ class QueryExecutor:
     def _execute_create_index(self, node: CreateIndexNode) -> Tuple[List[List[Any]], None]:
         """Execute CREATE INDEX statement."""
         if not self.index_manager:
-            raise ValueError("Index manager not available")
+            raise ExecutionError(
+                "Index manager is not available",
+                hint="Indexes require the index manager to be initialized. This may be a configuration issue."
+            )
         
         self.index_manager.create_index(node.index_name, node.table_name, node.column_name)
         return [], None
@@ -366,7 +386,10 @@ class QueryExecutor:
     def _execute_drop_index(self, node: DropIndexNode) -> Tuple[List[List[Any]], None]:
         """Execute DROP INDEX statement."""
         if not self.index_manager:
-            raise ValueError("Index manager not available")
+            raise ExecutionError(
+                "Index manager is not available",
+                hint="Dropping indexes requires the index manager to be initialized. This may be a configuration issue."
+            )
         
         self.index_manager.drop_index(node.index_name, node.table_name)
         return [], None

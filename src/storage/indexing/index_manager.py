@@ -71,6 +71,8 @@ class IndexManager:
         current_page_id = table_schema.first_page_id
         while current_page_id is not None:
             page = self.page_manager.read_page(current_page_id)
+            if page is None:
+                break
             
             # Use TableManager to deserialize rows
             from ..table_manager import TableManager
@@ -230,7 +232,10 @@ class IndexManager:
                 self._free_btree_pages(child_id)
         
         # Free this page
-        self.page_manager.free_page(root_page_id)
+        # Note: PageManager doesn't have free_page method yet
+        # Pages will be reclaimed on database compaction
+        # TODO: Implement page deallocation in PageManager
+        pass
     
     def rebuild_indexes_for_table(self, table_name: str) -> None:
         """

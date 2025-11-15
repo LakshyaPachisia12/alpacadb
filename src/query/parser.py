@@ -10,9 +10,9 @@ from .tokens import Token, TokenType
 from .ast_nodes import *
 
 
-class ParseError(Exception):
-    """Raised when parser encounters syntax error."""
-    pass
+# Keep old ParseError for backward compatibility but import from errors
+from ..errors import ParserError, SyntaxError as AlpacaSyntaxError
+ParseError = ParserError  # Alias for backward compatibility
 
 
 class Parser:
@@ -54,14 +54,16 @@ class Parser:
         """
         try:
             return self._statement()
-        except ParseError as e:
+        except (ParserError, AlpacaSyntaxError) as e:
             raise e
         except Exception as e:
             current_token = self._peek()
-            raise ParseError(
-                f"Unexpected error at line {current_token.line}, "
-                f"column {current_token.column}: {e}"
-            )
+            raise ParserError(
+                f"Unexpected error at line {current_token.line}, column {current_token.column}",
+                hint="This may be a syntax error. Check your query syntax carefully.",
+                token=current_token.lexeme if current_token else None,
+                context=f"Line {current_token.line}, Column {current_token.column}"
+            ) from e
     
     def _statement(self) -> ASTNode:
         """
@@ -105,10 +107,11 @@ class Parser:
             return TransactionNode('ROLLBACK')
         
         else:
-            raise ParseError(
-                f"Unexpected token '{token.lexeme}' at line {token.line}, "
-                f"column {token.column}. Expected statement keyword "
-                f"(CREATE, SELECT, INSERT, etc.)"
+            raise AlpacaSyntaxError(
+                f"Unexpected token '{token.lexeme}' at line {token.line}, column {token.column}",
+                hint="Expected a statement keyword (CREATE, SELECT, INSERT, UPDATE, DELETE, DROP, BEGIN, COMMIT, ROLLBACK).",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
             )
         
     def _create_statement(self) -> ASTNode:
@@ -121,7 +124,12 @@ class Parser:
         elif next_token.type == TokenType.INDEX:
             return self._create_index_statement()
         else:
-            raise ParseError("Expected 'TABLE' or 'INDEX' after CREATE")
+            raise AlpacaSyntaxError(
+                f"Expected 'TABLE' or 'INDEX' after CREATE, but got '{next_token.lexeme}'",
+                hint="CREATE statement must be followed by TABLE or INDEX. Example: CREATE TABLE users ... or CREATE INDEX idx_name ...",
+                token=next_token.lexeme,
+                context=f"Line {next_token.line}, Column {next_token.column}"
+            )
             
     def _create_index_statement(self) -> CreateIndexNode:
         """Parse CREATE INDEX statement."""
@@ -153,7 +161,12 @@ class Parser:
         elif next_token.type == TokenType.INDEX:
             return self._drop_index_statement()
         else:
-            raise ParseError("Expected 'TABLE' or 'INDEX' after DROP")
+            raise AlpacaSyntaxError(
+                f"Expected 'TABLE' or 'INDEX' after DROP, but got '{next_token.lexeme}'",
+                hint="DROP statement must be followed by TABLE or INDEX. Example: DROP TABLE users or DROP INDEX idx_name ...",
+                token=next_token.lexeme,
+                context=f"Line {next_token.line}, Column {next_token.column}"
+            )
             
     def _drop_index_statement(self) -> DropIndexNode:
         """Parse DROP INDEX statement."""
@@ -206,7 +219,12 @@ class Parser:
         # Validate: Only one PRIMARY KEY allowed
         primary_key_count = sum(1 for col in columns if col.is_primary_key)
         if primary_key_count > 1:
-            raise ParseError(f"Table '{table_name}' cannot have multiple PRIMARY KEY columns")
+            raise AlpacaSyntaxError(
+                f"Table '{table_name}' cannot have multiple PRIMARY KEY columns",
+                hint="A table can only have one PRIMARY KEY. Remove extra PRIMARY KEY constraints or use a composite key.",
+                token="PRIMARY KEY",
+                context=f"Table: {table_name}"
+            )
         
         return CreateTableNode(table_name, columns)
     
@@ -237,8 +255,12 @@ class Parser:
             data_type = 'BOOLEAN'
             self._consume(TokenType.BOOLEAN)
         else:
-            raise ParseError(
-                f"Expected data type (INT, STRING, BOOLEAN) at line {self._peek().line}"
+            token = self._peek()
+            raise AlpacaSyntaxError(
+                f"Expected data type (INT, STRING, BOOLEAN) at line {token.line}, but got '{token.lexeme}'",
+                hint="Column definitions require a data type after the column name. Valid types: INT, STRING, BOOLEAN.",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
             )
         
         # Optional constraints
@@ -380,12 +402,30 @@ class Parser:
                     break
                 self._consume(TokenType.COMMA)
         
-        # FROM keyword
-        self._consume(TokenType.FROM)
+        # FROM keyword (required)
+        try:
+            self._consume(TokenType.FROM)
+        except (ParserError, AlpacaSyntaxError):
+            token = self._peek()
+            raise AlpacaSyntaxError(
+                f"Expected 'FROM' keyword at line {token.line}, column {token.column}, but got '{token.lexeme}'",
+                hint="SELECT statement must include a FROM clause. Example: SELECT * FROM table_name",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
+            )
         
         # Table name
-        table_name_token = self._consume(TokenType.IDENTIFIER)
-        table_name = table_name_token.value
+        try:
+            table_name_token = self._consume(TokenType.IDENTIFIER)
+            table_name = table_name_token.value
+        except (ParserError, AlpacaSyntaxError):
+            token = self._peek()
+            raise AlpacaSyntaxError(
+                f"Expected table name after FROM at line {token.line}, column {token.column}, but got '{token.lexeme}'",
+                hint="After FROM, specify the table name. Example: SELECT * FROM users",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
+            )
         
         # Optional WHERE clause
         where_clause = None
@@ -592,7 +632,13 @@ class Parser:
         elif self._check(TokenType.MAX):
             return self._consume(TokenType.MAX)
         else:
-            raise ParseError(f"Expected aggregate function, got {self._peek()}")
+            token = self._peek()
+            raise AlpacaSyntaxError(
+                f"Expected aggregate function (COUNT, SUM, AVG, MIN, MAX) at line {token.line}, but got '{token.lexeme}'",
+                hint="Aggregate functions must be: COUNT, SUM, AVG, MIN, or MAX. Example: COUNT(*) or AVG(salary)",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
+            )
     
     def _check_aggregate_function(self) -> bool:
         """Check if current token is an aggregate function."""
@@ -646,7 +692,13 @@ class Parser:
         """
         # Left side (column reference)
         if not self._check(TokenType.IDENTIFIER):
-            raise ParseError(f"Expected column name at line {self._peek().line}")
+            token = self._peek()
+            raise AlpacaSyntaxError(
+                f"Expected column name at line {token.line}, column {token.column}, but got '{token.lexeme}'",
+                hint="Comparison operations require a column name on the left side. Example: age > 25",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
+            )
         
         left_token = self._consume(TokenType.IDENTIFIER)
         left = ColumnRef(left_token.value)
@@ -666,8 +718,11 @@ class Parser:
                 TokenType.GREATER_EQUAL: '>='
             }[op_token.type]
         else:
-            raise ParseError(
-                f"Expected comparison operator (=, !=, <, >, <=, >=) at line {op_token.line}"
+            raise AlpacaSyntaxError(
+                f"Expected comparison operator (=, !=, <, >, <=, >=) at line {op_token.line}, column {op_token.column}, but got '{op_token.lexeme}'",
+                hint="Valid comparison operators are: = (equal), != (not equal), < (less), > (greater), <= (less or equal), >= (greater or equal). Example: age > 25",
+                token=op_token.lexeme,
+                context=f"Line {op_token.line}, Column {op_token.column}"
             )
         
         # Right side (literal value)
@@ -696,8 +751,11 @@ class Parser:
             self._advance()
             return None
         else:
-            raise ParseError(
-                f"Expected literal value at line {token.line}, got '{token.lexeme}'"
+            raise AlpacaSyntaxError(
+                f"Expected literal value (number, string, boolean, NULL) at line {token.line}, column {token.column}, but got '{token.lexeme}'",
+                hint="Literal values can be: numbers (25), strings ('text'), booleans (TRUE/FALSE), or NULL. Example: WHERE age = 25",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
             )
     
     # ==================== Helper Methods ====================
@@ -718,9 +776,11 @@ class Parser:
             return self._advance()
         
         current = self._peek()
-        raise ParseError(
-            f"Expected {token_type.name} at line {current.line}, column {current.column}, "
-            f"but got {current.type.name} ('{current.lexeme}')"
+        raise AlpacaSyntaxError(
+            f"Expected {token_type.name} at line {current.line}, column {current.column}, but got {current.type.name} ('{current.lexeme}')",
+            hint=f"Expected {token_type.name} token here. Check your syntax.",
+            token=current.lexeme,
+            context=f"Line {current.line}, Column {current.column}"
         )
     
     def _advance(self) -> Token:
