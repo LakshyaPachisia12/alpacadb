@@ -194,6 +194,7 @@ def test_parse_select_group_by_multiple():
     ast = parse_query(query)
     
     assert isinstance(ast, SelectNode)
+    assert ast.group_by is not None
     assert ast.group_by.columns == ["dept", "city"]
     assert len(ast.aggregates) == 1
 
