@@ -5,7 +5,7 @@ Converts AST nodes into physical operator trees and executes them.
 """
 
 from typing import List, Any, Optional, Tuple
-from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator
+from .operators import PhysicalOperator, ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator, NestedLoopJoinOperator
 from ..query.ast_nodes import (
     SelectNode,
     InsertNode,
@@ -65,6 +65,69 @@ class QueryExecutor:
                 f"Unknown AST node type: {type(ast_node).__name__}",
                 hint="This query type is not supported. Supported types: SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, CREATE INDEX, DROP INDEX."
             )
+
+    def _build_base_operator_tree(self, node: SelectNode) -> Tuple[PhysicalOperator, List[str]]:
+        """
+        Build the base operator tree for scans and joins.
+        
+        Returns:
+            (root_operator, all_column_names)
+        """
+        # Start with the main table
+        main_table_schema = self.catalog.get_table_schema(node.table_name)
+        if not main_table_schema:
+            raise TableNotFoundError(node.table_name)
+        
+        main_columns = [col['name'].lower() for col in main_table_schema.columns]
+        
+        # Create qualified column names for the main table
+        main_table_alias = node.alias or node.table_name
+        qualified_main_columns = [f"{main_table_alias}.{col}" for col in main_columns]
+        
+        # Create scan for main table
+        main_scan = ScanOperator(
+            table_manager=self.table_manager,
+            table_name=node.table_name,
+            column_names=main_columns,
+        )
+        
+        current_operator = main_scan
+        all_columns = qualified_main_columns.copy()
+        
+        # Apply joins sequentially (left-deep join tree)
+        for join_clause in node.joins:
+            # Get schema for joined table
+            join_table_schema = self.catalog.get_table_schema(join_clause.table_name)
+            if not join_table_schema:
+                raise TableNotFoundError(join_clause.table_name)
+            
+            join_columns = [col['name'].lower() for col in join_table_schema.columns]
+            
+            # Create qualified column names for the joined table
+            table_alias = join_clause.alias or join_clause.table_name
+            qualified_join_columns = [f"{table_alias}.{col}" for col in join_columns]
+            
+            # Create scan for joined table
+            join_scan = ScanOperator(
+                table_manager=self.table_manager,
+                table_name=join_clause.table_name,
+                column_names=join_columns,
+            )
+            
+            # Create join operator
+            current_operator = NestedLoopJoinOperator(
+                left_child=current_operator,
+                right_child=join_scan,
+                join_type=join_clause.join_type,
+                join_condition=join_clause.on_condition,
+                left_columns=all_columns,
+                right_columns=qualified_join_columns,
+            )
+            
+            # Update column list with qualified names
+            all_columns.extend(qualified_join_columns)
+        
+        return current_operator, all_columns
 
     def _execute_select(self, node: SelectNode) -> Tuple[List[List[Any]], List[str]]:
         """
@@ -213,10 +276,13 @@ class QueryExecutor:
                 else:
                     col_name = agg.column if agg.column else '*'
                     output_columns.append(f"{agg.func_name}({col_name})")
-        elif "*" in (node.columns or ["*"]):
-            output_columns = all_column_names
         else:
-            output_columns = [col.lower() for col in (node.columns or [])]
+            # For regular queries, use selected columns or all columns
+            if "*" in (node.columns or ["*"]):
+                output_columns = all_column_names
+            else:
+                # Map qualified names like 'users.name' to final output labels 'name'
+                output_columns = [col.lower().split('.')[-1] for col in (node.columns or [])]
 
         return results, output_columns
 

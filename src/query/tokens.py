@@ -48,10 +48,16 @@ class TokenType(Enum):
     INTO = auto()
     VALUES = auto()
     SET = auto()
+    AS = auto()
     ORDER = auto()
     BY = auto()
     JOIN = auto()
     INNER = auto()
+    LEFT = auto()
+    RIGHT = auto()
+    FULL = auto()
+    OUTER = auto()
+    CROSS = auto()
     ON = auto()
     
     # Transaction Keywords
@@ -169,10 +175,16 @@ KEYWORDS = {
     'INTO': TokenType.INTO,
     'VALUES': TokenType.VALUES,
     'SET': TokenType.SET,
+    'AS': TokenType.AS,
     'ORDER': TokenType.ORDER,
     'BY': TokenType.BY,
     'JOIN': TokenType.JOIN,
     'INNER': TokenType.INNER,
+    'LEFT': TokenType.LEFT,
+    'RIGHT': TokenType.RIGHT,
+    'FULL': TokenType.FULL,
+    'OUTER': TokenType.OUTER,
+    'CROSS': TokenType.CROSS,
     'ON': TokenType.ON,
     'BEGIN': TokenType.BEGIN,
     'COMMIT': TokenType.COMMIT,

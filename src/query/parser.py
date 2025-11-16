@@ -422,7 +422,7 @@ class Parser:
                 context=f"Line {token.line}, Column {token.column}"
             )
         
-        # Table name
+        # Table name and optional alias
         try:
             table_name_token = self._consume(TokenType.IDENTIFIER)
             table_name = table_name_token.value
@@ -435,16 +435,35 @@ class Parser:
                 context=f"Line {token.line}, Column {token.column}"
             )
         
+        # Optional table alias
+        table_alias = None
+        if self._check(TokenType.IDENTIFIER) or self._check(TokenType.AS):
+            if self._check(TokenType.AS):
+                self._consume(TokenType.AS)
+            alias_token = self._consume(TokenType.IDENTIFIER)
+            table_alias = alias_token.value
+        
+        # Optional JOIN clauses (multiple)
+        joins = []
+        while (self._check(TokenType.INNER) or self._check(TokenType.LEFT) or 
+               self._check(TokenType.RIGHT) or self._check(TokenType.FULL) or 
+               self._check(TokenType.CROSS) or self._check(TokenType.JOIN)):
+            join_clause = self._join_clause()
+            joins.append(join_clause)
+        
+        # For backward compatibility, set join_clause if there's only one join
+        join_clause = joins[0] if len(joins) == 1 else None
+        
         # Optional WHERE clause
         where_clause = None
         if self._check(TokenType.WHERE):
             self._consume(TokenType.WHERE)
             where_clause = self._expression()
         
-        # Optional JOIN clause
-        join_clause = None
-        if self._check(TokenType.INNER) or self._check(TokenType.JOIN):
-            join_clause = self._join_clause()
+        # Optional GROUP BY clause
+        group_by = None
+        if self._check(TokenType.GROUP):
+            group_by = self._parse_group_by_clause()
         
         # Optional GROUP BY clause
         group_by = None
@@ -469,7 +488,17 @@ class Parser:
         if self._check(TokenType.SEMICOLON):
             self._consume(TokenType.SEMICOLON)
         
-        return SelectNode(columns, table_name, where_clause, group_by, order_by, join_clause, aggregates)
+        return SelectNode(
+            columns=columns, 
+            table_name=table_name, 
+            alias=table_alias,
+            joins=joins,
+            where_clause=where_clause, 
+            group_by=group_by, 
+            order_by=order_by, 
+            join_clause=join_clause, 
+            aggregates=aggregates
+        )
     
     def _update_statement(self) -> UpdateNode:
         """
@@ -542,14 +571,38 @@ class Parser:
     
     def _join_clause(self) -> JoinClause:
         """
-        Parse: INNER JOIN table ON condition
+        Parse join clauses: [INNER|LEFT|RIGHT|FULL|CROSS] JOIN table [AS alias] [ON condition]
         
-        Example:
+        Examples:
             INNER JOIN orders ON users.id = orders.user_id
+            LEFT JOIN orders o ON users.id = o.user_id
+            CROSS JOIN products
+            FULL OUTER JOIN categories c ON p.category_id = c.id
         """
-        # INNER keyword (optional)
+        # Join type
+        join_type = 'INNER'  # Default
+        
         if self._check(TokenType.INNER):
             self._consume(TokenType.INNER)
+            join_type = 'INNER'
+        elif self._check(TokenType.LEFT):
+            self._consume(TokenType.LEFT)
+            if self._check(TokenType.OUTER):
+                self._consume(TokenType.OUTER)
+            join_type = 'LEFT'
+        elif self._check(TokenType.RIGHT):
+            self._consume(TokenType.RIGHT)
+            if self._check(TokenType.OUTER):
+                self._consume(TokenType.OUTER)
+            join_type = 'RIGHT'
+        elif self._check(TokenType.FULL):
+            self._consume(TokenType.FULL)
+            if self._check(TokenType.OUTER):
+                self._consume(TokenType.OUTER)
+            join_type = 'FULL'
+        elif self._check(TokenType.CROSS):
+            self._consume(TokenType.CROSS)
+            join_type = 'CROSS'
         
         self._consume(TokenType.JOIN)
         
@@ -557,13 +610,110 @@ class Parser:
         table_token = self._consume(TokenType.IDENTIFIER)
         table_name = table_token.value
         
-        # ON keyword
-        self._consume(TokenType.ON)
+        # Optional alias
+        alias = None
+        if self._check(TokenType.IDENTIFIER) or self._check(TokenType.AS):
+            if self._check(TokenType.AS):
+                self._consume(TokenType.AS)
+            alias_token = self._consume(TokenType.IDENTIFIER)
+            alias = alias_token.value
         
-        # Join condition
-        condition = self._expression()
+        # ON condition (not for CROSS JOIN)
+        condition = None
+        if join_type != 'CROSS' and self._check(TokenType.ON):
+            self._consume(TokenType.ON)
+            condition = self._expression()
         
-        return JoinClause('INNER', table_name, condition)
+        return JoinClause(join_type, table_name, alias, condition)
+    
+    def _parse_aggregate_function(self) -> AggregateFunction:
+        """
+        Parse aggregate function: COUNT(*), SUM(column), etc.
+        
+        Examples:
+            COUNT(*)
+            SUM(salary)
+            AVG(age) AS average_age
+        """
+        # Consume the function name token
+        func_token = self._consume_aggregate_function()
+        func_name = func_token.value.upper()
+        
+        self._consume(TokenType.LEFT_PAREN)
+        
+        column = None
+        if not self._check(TokenType.STAR):
+            col_token = self._consume(TokenType.IDENTIFIER)
+            column = col_token.value
+        else:
+            self._consume(TokenType.STAR)
+        
+        self._consume(TokenType.RIGHT_PAREN)
+        
+        # Optional AS alias
+        alias = None
+        if self._check(TokenType.IDENTIFIER) and self._peek().value.upper() == 'AS':
+            self._consume(TokenType.IDENTIFIER)  # consume 'AS'
+            alias_token = self._consume(TokenType.IDENTIFIER)
+            alias = alias_token.value
+        
+        return AggregateFunction(func_name, column, alias)
+    
+    def _parse_group_by_clause(self) -> GroupByNode:
+        """
+        Parse GROUP BY clause with optional HAVING.
+        
+        Examples:
+            GROUP BY department
+            GROUP BY department, city HAVING COUNT(*) > 5
+        """
+        self._consume(TokenType.GROUP)
+        self._consume(TokenType.BY)
+        
+        # Group columns
+        columns = []
+        while True:
+            col_token = self._consume(TokenType.IDENTIFIER)
+            columns.append(col_token.value)
+            
+            if not self._check(TokenType.COMMA):
+                break
+            self._consume(TokenType.COMMA)
+        
+        # Optional HAVING clause
+        having_clause = None
+        if self._check(TokenType.HAVING):
+            self._consume(TokenType.HAVING)
+            having_clause = self._expression()
+        
+        return GroupByNode(columns, having_clause)
+    
+    def _consume_aggregate_function(self) -> Token:
+        """Consume and return an aggregate function token."""
+        if self._check(TokenType.COUNT):
+            return self._consume(TokenType.COUNT)
+        elif self._check(TokenType.SUM):
+            return self._consume(TokenType.SUM)
+        elif self._check(TokenType.AVG):
+            return self._consume(TokenType.AVG)
+        elif self._check(TokenType.MIN):
+            return self._consume(TokenType.MIN)
+        elif self._check(TokenType.MAX):
+            return self._consume(TokenType.MAX)
+        else:
+            token = self._peek()
+            raise AlpacaSyntaxError(
+                f"Expected aggregate function (COUNT, SUM, AVG, MIN, MAX) at line {token.line}, but got '{token.lexeme}'",
+                hint="Aggregate functions must be: COUNT, SUM, AVG, MIN, or MAX. Example: COUNT(*) or AVG(salary)",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
+            )
+    
+    def _check_aggregate_function(self) -> bool:
+        """Check if current token is an aggregate function."""
+        return self._check(TokenType.COUNT) or self._check(TokenType.SUM) or \
+               self._check(TokenType.AVG) or self._check(TokenType.MIN) or \
+               self._check(TokenType.MAX)
     
     def _parse_aggregate_function(self) -> AggregateFunction:
         """
@@ -733,8 +883,14 @@ class Parser:
                 context=f"Line {op_token.line}, Column {op_token.column}"
             )
         
-        # Right side (literal value)
-        right = Literal(self._literal())
+        # Right side (column reference or literal value)
+        if self._check(TokenType.IDENTIFIER):
+            # Column reference
+            right_token = self._consume(TokenType.IDENTIFIER)
+            right = ColumnRef(right_token.value)
+        else:
+            # Literal value
+            right = Literal(self._literal())
         
         return BinaryOp(left, operator, right)
     

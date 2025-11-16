@@ -189,8 +189,8 @@ class Lexer:
         self._add_token(TokenType.INTEGER_LITERAL, value)
     
     def _identifier(self):
-        """Parse identifier or keyword."""
-        while self._peek().isalnum() or self._peek() == '_':
+        """Parse identifier or keyword (including qualified names like table.column)."""
+        while self._peek().isalnum() or self._peek() in ('_', '.'):
             self._advance()
         
         lexeme = self.source[self.start:self.current]

@@ -645,3 +645,259 @@ class AggregateOperator(PhysicalOperator):
         agg_names = [f"{a.func_name}({a.column or '*'})" for a in self.aggregates]
         group_cols = ', '.join(self.group_by_columns) if self.group_by_columns else 'None'
         return f"AggregateOperator(aggregates=[{', '.join(agg_names)}], group_by=[{group_cols}])"
+
+
+class NestedLoopJoinOperator(PhysicalOperator):
+    """
+    Nested Loop Join Operator
+    
+    Implements all SQL join types using nested loop algorithm:
+    - INNER JOIN: Only matching rows
+    - LEFT JOIN: All left rows, NULL-padded right rows
+    - RIGHT JOIN: All right rows, NULL-padded left rows  
+    - FULL JOIN: All rows from both sides, NULL-padded
+    - CROSS JOIN: Cartesian product (no condition)
+    """
+
+    def __init__(self, left_child: PhysicalOperator, right_child: PhysicalOperator, 
+                 join_type: str, join_condition=None, 
+                 left_columns: List[str] = None, right_columns: List[str] = None):
+        """
+        Initialize join operator.
+        
+        Args:
+            left_child: Left input operator
+            right_child: Right input operator
+            join_type: 'INNER', 'LEFT', 'RIGHT', 'FULL', 'CROSS'
+            join_condition: AST node for join condition (None for CROSS JOIN)
+            left_columns: Column names from left side (qualified)
+            right_columns: Column names from right side (qualified)
+        """
+        super().__init__()
+        self.left_child = left_child
+        self.right_child = right_child
+        self.join_type = join_type.upper()
+        self.join_condition = join_condition
+        self.left_columns = left_columns or []
+        self.right_columns = right_columns or []
+        
+        # For evaluation - combine qualified column names
+        self.all_columns = self.left_columns + self.right_columns
+        
+        # Buffers for different join types
+        self._left_rows = []
+        self._right_rows = []
+        self._output_buffer = []
+        self._buffer_idx = 0
+
+    def open(self):
+        super().open()
+        self.left_child.open()
+        self.right_child.open()
+        
+        # Collect all rows from both children
+        self._left_rows = self._collect_all_rows(self.left_child)
+        self._right_rows = self._collect_all_rows(self.right_child)
+        
+        # Close children as we have all their data
+        self.left_child.close()
+        self.right_child.close()
+        
+        # Perform the join
+        self._output_buffer = self._perform_join()
+        self._buffer_idx = 0
+
+    def _collect_all_rows(self, operator: PhysicalOperator) -> List[List[Any]]:
+        """Collect all rows from an operator."""
+        rows = []
+        while True:
+            row = operator.next()
+            if row is None:
+                break
+            rows.append(row)
+        return rows
+
+    def _perform_join(self) -> List[List[Any]]:
+        """Perform the join operation based on join type."""
+        results = []
+        
+        if self.join_type == 'CROSS':
+            # Cartesian product - every left row with every right row
+            for left_row in self._left_rows:
+                for right_row in self._right_rows:
+                    results.append(left_row + right_row)
+        
+        elif self.join_type == 'INNER':
+            # Only matching rows
+            for left_row in self._left_rows:
+                for right_row in self._right_rows:
+                    if self._matches_condition(left_row, right_row):
+                        results.append(left_row + right_row)
+        
+        elif self.join_type == 'LEFT':
+            # All left rows, NULL-pad right side when no match
+            right_nulls = [None] * len(self.right_columns)
+            for left_row in self._left_rows:
+                found_match = False
+                for right_row in self._right_rows:
+                    if self._matches_condition(left_row, right_row):
+                        results.append(left_row + right_row)
+                        found_match = True
+                if not found_match:
+                    results.append(left_row + right_nulls)
+        
+        elif self.join_type == 'RIGHT':
+            # All right rows, NULL-pad left side when no match
+            left_nulls = [None] * len(self.left_columns)
+            for right_row in self._right_rows:
+                found_match = False
+                for left_row in self._left_rows:
+                    if self._matches_condition(left_row, right_row):
+                        results.append(left_row + right_row)
+                        found_match = True
+                if not found_match:
+                    results.append(left_nulls + right_row)
+        
+        elif self.join_type == 'FULL':
+            # All rows from both sides, NULL-pad when no match
+            left_nulls = [None] * len(self.left_columns)
+            right_nulls = [None] * len(self.right_columns)
+            
+            # Track which rows have been matched
+            left_matched = [False] * len(self._left_rows)
+            right_matched = [False] * len(self._right_rows)
+            
+            # First, add all matching pairs
+            for i, left_row in enumerate(self._left_rows):
+                for j, right_row in enumerate(self._right_rows):
+                    if self._matches_condition(left_row, right_row):
+                        results.append(left_row + right_row)
+                        left_matched[i] = True
+                        right_matched[j] = True
+            
+            # Add unmatched left rows
+            for i, left_row in enumerate(self._left_rows):
+                if not left_matched[i]:
+                    results.append(left_row + right_nulls)
+            
+            # Add unmatched right rows
+            for j, right_row in enumerate(self._right_rows):
+                if not right_matched[j]:
+                    results.append(left_nulls + right_row)
+        
+        return results
+
+    def _matches_condition(self, left_row: List[Any], right_row: List[Any]) -> bool:
+        """Check if a pair of rows matches the join condition."""
+        if self.join_condition is None:
+            return True  # CROSS JOIN always matches
+        
+        # Evaluate the join condition
+        return self._evaluate_condition(left_row + right_row, self.join_condition)
+
+    def _evaluate_condition(self, row: List[Any], condition) -> bool:
+        """Evaluate a condition on a combined row."""
+        if condition is None:
+            return True
+
+        # Import here to avoid circular dependency
+        from ..query.ast_nodes import BinaryOp, ColumnRef, Literal
+
+        def evaluate(node):
+            if isinstance(node, BinaryOp):
+                left = evaluate(node.left)
+                right = evaluate(node.right)
+
+                op = node.operator.upper()
+                if op == "=":
+                    return left == right
+                elif op == "!=" or op == "<>":
+                    return left != right
+                elif op == "<":
+                    return left < right
+                elif op == ">":
+                    return left > right
+                elif op == "<=":
+                    return left <= right
+                elif op == ">=":
+                    return left >= right
+                elif op == "AND":
+                    return left and right
+                elif op == "OR":
+                    return left or right
+                else:
+                    raise ExecutionError(f"Unknown operator in join condition: {op}")
+
+            elif isinstance(node, ColumnRef):
+                # Handle qualified or unqualified column names (table.column or column)
+                col_name = node.name.lower()
+
+                # Quick exact match for fully qualified or plain names
+                if col_name in self.all_columns:
+                    idx = self.all_columns.index(col_name)
+                    return row[idx]
+
+                # If name is qualified but not present, try matching by the unqualified part
+                if '.' in col_name:
+                    unqual = col_name.split('.')[-1]
+                    matches = [i for i, c in enumerate(self.all_columns) if c.endswith('.' + unqual)]
+                    if len(matches) == 1:
+                        return row[matches[0]]
+                    elif len(matches) > 1:
+                        raise ColumnNotFoundError(
+                            col_name,
+                            hint=(
+                                f"Ambiguous column '{col_name}'. Matches found: {', '.join(self.all_columns[i] for i in matches)}"
+                            ),
+                        )
+                    else:
+                        raise ColumnNotFoundError(
+                            col_name,
+                            hint=f"Qualified column '{col_name}' not found. Available: {', '.join(self.all_columns)}"
+                        )
+
+                # Unqualified name - check suffix matches against qualified list
+                matches = [i for i, c in enumerate(self.all_columns) if c.endswith('.' + col_name) or c == col_name]
+                if len(matches) == 1:
+                    return row[matches[0]]
+                elif len(matches) > 1:
+                    raise ColumnNotFoundError(
+                        col_name,
+                        hint=(
+                            f"Ambiguous column '{col_name}'. Matches found: {', '.join(self.all_columns[i] for i in matches)}"
+                        ),
+                    )
+                else:
+                    raise ColumnNotFoundError(
+                        col_name,
+                        hint=f"Column '{col_name}' not found. Available: {', '.join(self.all_columns)}"
+                    )
+
+            elif isinstance(node, Literal):
+                return node.value
+
+            else:
+                raise ExecutionError(f"Unsupported node type in join condition: {type(node)}")
+
+        return evaluate(condition)
+
+    def next(self) -> Optional[List[Any]]:
+        if not self._opened:
+            raise RuntimeError("Operator not opened")
+        
+        if self._buffer_idx >= len(self._output_buffer):
+            return None
+        
+        row = self._output_buffer[self._buffer_idx]
+        self._buffer_idx += 1
+        return row
+
+    def close(self):
+        super().close()
+        self._left_rows = []
+        self._right_rows = []
+        self._output_buffer = []
+        self._buffer_idx = 0
+
+    def __repr__(self):
+        return f"{self.join_type}JoinOperator(left={self.left_child}, right={self.right_child})"
