@@ -544,7 +544,8 @@ Examples:
                 self.index_manager.create_index(
                     ast.index_name,
                     ast.table_name,
-                    ast.column_name
+                    ast.column_name,
+                    self.table_manager
                 )
                 success = True
             else:

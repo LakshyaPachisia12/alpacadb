@@ -245,7 +245,7 @@ class IndexManager:
         
         # Create temporary BTree to deserialize the node
         btree = BTree(self.page_manager)    
-        node = btree._deserialize_node(page.records[0])
+        node = btree._deserialize_node(page.records[0])  # type: ignore[attr-defined]
         
         # Recursively free child pages
         if not node.is_leaf:
@@ -253,7 +253,7 @@ class IndexManager:
                 self._free_btree_pages(child_id)
         
         # Free this page
-        self.page_manager.free_page(root_page_id)
+        self.page_manager.free_page(root_page_id)  # type: ignore[attr-defined]
     
     def rebuild_indexes_for_table(self, table_name: str) -> None:
         """

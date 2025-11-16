@@ -259,8 +259,12 @@ class BTree:
         if self.root_page_id is None:
             return []
         
+        root_node = self._read_node(self.root_page_id)
+        if root_node is None:
+            return []
+        
         results = []
-        self._range_scan_node(self._read_node(self.root_page_id), min_key, max_key,
+        self._range_scan_node(root_node, min_key, max_key,
                              min_inclusive, max_inclusive, results)
         return results
     
@@ -298,7 +302,8 @@ class BTree:
             for i in range(len(node.children)):
                 # Visit child
                 child = self._read_node(node.children[i])
-                self._range_scan_node(child, min_key, max_key, min_inclusive, max_inclusive, results)
+                if child is not None:
+                    self._range_scan_node(child, min_key, max_key, min_inclusive, max_inclusive, results)
 
     
     def _search_recursive(self, page_id: int, key: Any, depth: int = 0) -> Optional[Tuple[int, int]]:
@@ -344,7 +349,11 @@ class BTree:
             key: The indexed value (e.g., email address)
             value: Tuple of (page_id, row_id) where the row is stored
         """
+        if self.root_page_id is None:
+            raise RuntimeError("BTree root not initialized")
+            
         root = self._read_node(self.root_page_id)
+        assert root is not None, "Failed to read root node"
         
         # If root is full, split it
         if root.is_full():
@@ -370,6 +379,7 @@ class BTree:
             value: Value to insert
         """
         node = self._read_node(page_id)
+        assert node is not None, f"Failed to read node at page {page_id}"
         idx = self._binary_search(node.keys, key)
         
         if node.is_leaf:
@@ -381,6 +391,7 @@ class BTree:
             # Recurse to child
             child_id = node.children[idx]
             child = self._read_node(child_id)
+            assert child is not None, f"Failed to read child at page {child_id}"
             
             if child.is_full():
                 # Split child before recursing
@@ -407,6 +418,7 @@ class BTree:
             Page ID of new right sibling
         """
         child = self._read_node(child_id)
+        assert child is not None, f"Failed to read child at page {child_id}"
         mid = len(child.keys) // 2
         
         # CRITICAL FIX: Save the median key BEFORE modifying arrays
@@ -466,9 +478,12 @@ class BTree:
             return False
         
         root = self._read_node(self.root_page_id)
+        if root is None:
+            return False
+        
         success = self._delete_from_node(self.root_page_id, root, key, value)
         
-        # If root is now empty and has children, promote first child
+        # If root becomes empty after deletion and has children, promote the only child
         if success and not root.is_leaf and len(root.keys) == 0:
             if len(root.children) > 0:
                 self.root_page_id = root.children[0]
@@ -514,6 +529,8 @@ class BTree:
             if i < len(node.children):
                 child_id = node.children[i]
                 child = self._read_node(child_id)
+                if child is None:
+                    return False
                 return self._delete_from_node(child_id, child, key, value)
             
             return False

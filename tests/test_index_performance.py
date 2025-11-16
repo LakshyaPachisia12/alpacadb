@@ -45,7 +45,7 @@ class IndexPerformanceTester:
         self.index_manager = IndexManager(self.catalog, self.page_manager)
         
         # Connect managers
-        self.table_manager.index_manager = self.index_manager
+        self.table_manager.index_manager = self.index_manager  # type: ignore[misc]
         
         # Create test table
         columns = [
@@ -83,6 +83,8 @@ class IndexPerformanceTester:
         
         # Clear test emails for new dataset
         self.test_emails = []
+        
+        assert self.table_manager is not None, "TableManager not initialized"
         
         start_time = time.time()
         
@@ -211,6 +213,9 @@ class IndexPerformanceTester:
         """Test query performance WITH index."""
         print(f"\n🔍 Testing {num_queries} queries WITH index...")
         
+        assert self.index_manager is not None, "IndexManager not initialized"
+        assert self.table_manager is not None, "TableManager not initialized"
+        
         # Create index using IndexManager
         self.index_manager.create_index('idx_email', 'users', 'email',
                                        table_manager=self.table_manager)
@@ -225,6 +230,7 @@ class IndexPerformanceTester:
             test_email = self.test_emails[i % len(self.test_emails)]
             
             # Use index-aware select
+            assert self.table_manager is not None
             matches = self.table_manager.select_with_index('users', 'email', test_email)
         
         elapsed = time.time() - start_time

@@ -57,7 +57,7 @@ class TestBTreeBasicOperations:
         page_manager, catalog, index_manager, table_manager = temp_db
         
         # Create index on email column
-        index_manager.create_index('idx_email', 'users', 'email')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
         
         # Verify index was created
         assert 'idx_email' in catalog.indexes
@@ -83,7 +83,7 @@ class TestBTreeBasicOperations:
         page_manager, catalog, index_manager, table_manager = temp_db
         
         # Create index
-        index_manager.create_index('idx_email', 'users', 'email')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
         btree = index_manager.get_btree('idx_email')
         
         # Search for non-existent email
@@ -95,11 +95,13 @@ class TestBTreeBasicOperations:
         page_manager, catalog, index_manager, table_manager = temp_db
         
         # Create index on existing data
-        index_manager.create_index('idx_email', 'users', 'email')
-        btree = index_manager.get_btree('idx_email')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
         
         # Insert new row
         table_manager.insert_row('users', [6, 'frank@example.com', 40])
+        
+        # Get btree again after insert to ensure we have the latest state
+        btree = index_manager.get_btree('idx_email')
         
         # Verify new row is in index
         result = btree.search('frank@example.com')
@@ -110,8 +112,8 @@ class TestBTreeBasicOperations:
         page_manager, catalog, index_manager, table_manager = temp_db
         
         # Create indexes on email and age
-        index_manager.create_index('idx_email', 'users', 'email')
-        index_manager.create_index('idx_age', 'users', 'age')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
+        index_manager.create_index('idx_age', 'users', 'age', table_manager)
         
         # Verify both indexes work
         email_btree = index_manager.get_btree('idx_email')
@@ -127,7 +129,7 @@ class TestBTreeBasicOperations:
         page_manager, catalog, index_manager, table_manager = temp_db
         
         # Create index
-        index_manager.create_index('idx_id', 'users', 'id')
+        index_manager.create_index('idx_id', 'users', 'id', table_manager)
         btree = index_manager.get_btree('idx_id')
         
         # Insert many more rows to trigger splits (order=4 means max 7 keys per node)

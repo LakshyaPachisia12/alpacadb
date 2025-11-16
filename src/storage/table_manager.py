@@ -40,7 +40,7 @@ class TableManager:
         """
         self.page_manager = page_manager
         self.catalog = catalog
-        self.index_manager = None  # Will be set externally
+        self.index_manager = index_manager  # Store the index_manager if provided
     
     def insert_row(self, table_name: str, values: List[Any]) -> bool:
         """

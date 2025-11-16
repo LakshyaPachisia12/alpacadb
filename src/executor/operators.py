@@ -529,3 +529,415 @@ class IndexRangeScanOperator(PhysicalOperator):
         max_op = '<=' if self.max_inclusive else '<'
         return f"IndexRangeScanOperator(index={self.index_name}, range={self.range_min}{min_op}..{max_op}{self.range_max})"
 
+
+class AggregateOperator(PhysicalOperator):
+    """
+    Aggregation Operator
+    Groups rows by specified columns and applies aggregate functions.
+
+    Handles GROUP BY and aggregate functions like COUNT, SUM, AVG, MIN, MAX.
+    """
+
+    def __init__(self, child: PhysicalOperator, aggregates: List, group_by_columns: Optional[List[str]] = None,
+                 having_predicate=None, column_names: Optional[List[str]] = None):
+        super().__init__()
+        self.child = child
+        self.aggregates = aggregates  # List of AggregateFunction AST nodes
+        self.group_by_columns = group_by_columns or []  # Column names to group by
+        self.having_predicate = having_predicate  # HAVING condition
+        self.column_names = column_names or []  # For evaluating HAVING predicates
+        self._results = []
+        self._current_idx = 0
+
+    def open(self):
+        super().open()
+        self.child.open()
+
+        # Collect all rows from child
+        all_rows = []
+        while True:
+            row = self.child.next()
+            if row is None:
+                break
+            all_rows.append(row)
+
+        self.child.close()
+
+        # Perform aggregation
+        self._results = self._perform_aggregation(all_rows)
+        self._current_idx = 0
+
+    def next(self) -> Optional[List[Any]]:
+        if not self._opened:
+            raise RuntimeError("Operator not opened")
+
+        if self._current_idx >= len(self._results):
+            return None
+
+        row = self._results[self._current_idx]
+        self._current_idx += 1
+        return row
+
+    def close(self):
+        super().close()
+        self._results = []
+        self._current_idx = 0
+
+    def _perform_aggregation(self, rows: List[List[Any]]) -> List[List[Any]]:
+        """Perform grouping and aggregation on the rows."""
+        if not self.aggregates and not self.group_by_columns:
+            # No aggregation, just pass through (shouldn't happen in practice)
+            return rows
+
+        # If no GROUP BY, treat all rows as one group
+        if not self.group_by_columns:
+            groups = {(): rows}
+        else:
+            # Group rows by GROUP BY columns
+            groups = {}
+            group_indices = []
+            for col_name in self.group_by_columns:
+                try:
+                    idx = self.column_names.index(col_name.lower())
+                    group_indices.append(idx)
+                except ValueError:
+                    raise ValueError(f"Unknown GROUP BY column: {col_name}")
+
+            for row in rows:
+                key = tuple(row[i] for i in group_indices)
+                if key not in groups:
+                    groups[key] = []
+                groups[key].append(row)
+
+        # Apply aggregates to each group
+        results = []
+        for group_key, group_rows in groups.items():
+            result_row = list(group_key)  # Start with GROUP BY columns
+
+            # Apply each aggregate function
+            for agg in self.aggregates:
+                value: Any
+                if agg.func_name == 'COUNT':
+                    if agg.column is None:  # COUNT(*)
+                        value = len(group_rows)
+                    else:
+                        # COUNT(column) - count non-null values
+                        col_idx = self.column_names.index(agg.column.lower())
+                        value = sum(1 for row in group_rows if row[col_idx] is not None)
+                elif agg.func_name == 'SUM':
+                    col_idx = self.column_names.index(agg.column.lower())
+                    values = [row[col_idx] for row in group_rows if row[col_idx] is not None]
+                    value = sum(values) if values else 0
+                elif agg.func_name == 'AVG':
+                    col_idx = self.column_names.index(agg.column.lower())
+                    values = [row[col_idx] for row in group_rows if row[col_idx] is not None]
+                    value = sum(values) / len(values) if values else 0
+                elif agg.func_name == 'MIN':
+                    col_idx = self.column_names.index(agg.column.lower())
+                    values = [row[col_idx] for row in group_rows if row[col_idx] is not None]
+                    value = min(values) if values else None
+                elif agg.func_name == 'MAX':
+                    col_idx = self.column_names.index(agg.column.lower())
+                    values = [row[col_idx] for row in group_rows if row[col_idx] is not None]
+                    value = max(values) if values else None
+                else:
+                    raise ValueError(f"Unknown aggregate function: {agg.func_name}")
+
+                result_row.append(value)
+
+            results.append(result_row)
+
+        # Apply HAVING filter if present
+        if self.having_predicate:
+            filtered_results = []
+            for result_row in results:
+                if self._evaluate_having(result_row):
+                    filtered_results.append(result_row)
+            results = filtered_results
+
+        return results
+
+    def _evaluate_having(self, row: List[Any]) -> bool:
+        """Evaluate HAVING predicate on an aggregated row."""
+        if self.having_predicate is None:
+            return True
+
+        # Import here to avoid circular dependency
+        from ..query.ast_nodes import BinaryOp, ColumnRef, Literal
+
+        def evaluate(node):
+            if isinstance(node, BinaryOp):
+                left = evaluate(node.left)
+                right = evaluate(node.right)
+
+                op = node.operator.upper()
+                if op == "=":
+                    return left == right
+                elif op == "!=":
+                    return left != right
+                elif op == "<>":
+                    return left != right
+                elif op == "<":
+                    return left < right
+                elif op == ">":
+                    return left > right
+                elif op == "<=":
+                    return left <= right
+                elif op == ">=":
+                    return left >= right
+                elif op == "AND":
+                    return left and right
+                elif op == "OR":
+                    return left or right
+                else:
+                    raise ValueError(f"Unknown operator in HAVING: {op}")
+
+            elif isinstance(node, ColumnRef):
+                # For HAVING, we can reference aggregate results by alias or column name
+                # For now, assume we can evaluate against the result row
+                # This is simplified - in practice, HAVING can reference aggregates
+                col_name = node.name.lower()
+                # Try to find in original column names first
+                try:
+                    col_idx = self.column_names.index(col_name)
+                    return row[col_idx]
+                except ValueError:
+                    # Check if it's an aggregate result (by position)
+                    # This is a simplification - proper implementation would track aliases
+                    pass
+                raise ValueError(f"Unknown column in HAVING: {col_name}")
+
+            elif isinstance(node, Literal):
+                return node.value
+
+            else:
+                raise ValueError(f"Unknown node type in HAVING: {type(node)}")
+
+        return evaluate(self.having_predicate)
+
+    def __repr__(self):
+        agg_names = [f"{a.func_name}({a.column or '*'})" for a in self.aggregates]
+        group_cols = ', '.join(self.group_by_columns) if self.group_by_columns else 'None'
+        return f"AggregateOperator(aggregates=[{', '.join(agg_names)}], group_by=[{group_cols}])"
+
+
+class NestedLoopJoinOperator(PhysicalOperator):
+    """
+    Nested Loop Join Operator
+    Implements join operations (INNER, LEFT, RIGHT, FULL, CROSS)
+    """
+
+    def __init__(self, left_child: PhysicalOperator, right_child: PhysicalOperator,
+                 join_type: str, join_condition, left_columns: List[str], right_columns: List[str]):
+        super().__init__()
+        self.left_child = left_child
+        self.right_child = right_child
+        self.join_type = join_type.upper()
+        self.join_condition = join_condition
+        self.left_columns = left_columns
+        self.right_columns = right_columns
+        self._left_rows: List[List[Any]] = []
+        self._right_rows: List[List[Any]] = []
+        self._results: List[List[Any]] = []
+        self._current_idx = 0
+
+    def open(self):
+        super().open()
+        # Materialize both sides
+        self.left_child.open()
+        self._left_rows = []
+        while True:
+            row = self.left_child.next()
+            if row is None:
+                break
+            self._left_rows.append(row)
+        self.left_child.close()
+
+        self.right_child.open()
+        self._right_rows = []
+        while True:
+            row = self.right_child.next()
+            if row is None:
+                break
+            self._right_rows.append(row)
+        self.right_child.close()
+
+        # Perform join
+        self._results = self._perform_join()
+        self._current_idx = 0
+
+    def next(self) -> Optional[List[Any]]:
+        if not self._opened:
+            raise RuntimeError("Operator not opened")
+
+        if self._current_idx >= len(self._results):
+            return None
+
+        row = self._results[self._current_idx]
+        self._current_idx += 1
+        return row
+
+    def close(self):
+        super().close()
+        self._left_rows = []
+        self._right_rows = []
+        self._results = []
+        self._current_idx = 0
+
+    def _perform_join(self) -> List[List[Any]]:
+        """Perform the join operation based on join type."""
+        if self.join_type == 'INNER':
+            return self._inner_join()
+        elif self.join_type == 'LEFT':
+            return self._left_join()
+        elif self.join_type == 'RIGHT':
+            return self._right_join()
+        elif self.join_type == 'FULL':
+            return self._full_join()
+        elif self.join_type == 'CROSS':
+            return self._cross_join()
+        else:
+            raise ValueError(f"Unknown join type: {self.join_type}")
+
+    def _inner_join(self) -> List[List[Any]]:
+        """INNER JOIN: Only matching rows from both sides."""
+        results = []
+        for left_row in self._left_rows:
+            for right_row in self._right_rows:
+                if self._evaluate_join_condition(left_row, right_row):
+                    combined = left_row + right_row
+                    results.append(combined)
+        return results
+
+    def _left_join(self) -> List[List[Any]]:
+        """LEFT JOIN: All left rows, with matching right rows or NULLs."""
+        results = []
+        for left_row in self._left_rows:
+            matched = False
+            for right_row in self._right_rows:
+                if self._evaluate_join_condition(left_row, right_row):
+                    combined = left_row + right_row
+                    results.append(combined)
+                    matched = True
+            if not matched:
+                # No match found, add NULLs for right side
+                null_right = [None] * len(self.right_columns)
+                combined = left_row + null_right
+                results.append(combined)
+        return results
+
+    def _right_join(self) -> List[List[Any]]:
+        """RIGHT JOIN: All right rows, with matching left rows or NULLs."""
+        results = []
+        for right_row in self._right_rows:
+            matched = False
+            for left_row in self._left_rows:
+                if self._evaluate_join_condition(left_row, right_row):
+                    combined = left_row + right_row
+                    results.append(combined)
+                    matched = True
+            if not matched:
+                # No match found, add NULLs for left side
+                null_left = [None] * len(self.left_columns)
+                combined = null_left + right_row
+                results.append(combined)
+        return results
+
+    def _full_join(self) -> List[List[Any]]:
+        """FULL JOIN: All rows from both sides, with NULLs where no match."""
+        results = []
+        left_matched = set()
+        right_matched = set()
+
+        # First pass: find all matches
+        for left_idx, left_row in enumerate(self._left_rows):
+            for right_idx, right_row in enumerate(self._right_rows):
+                if self._evaluate_join_condition(left_row, right_row):
+                    combined = left_row + right_row
+                    results.append(combined)
+                    left_matched.add(left_idx)
+                    right_matched.add(right_idx)
+
+        # Add unmatched left rows
+        for left_idx, left_row in enumerate(self._left_rows):
+            if left_idx not in left_matched:
+                null_right = [None] * len(self.right_columns)
+                combined = left_row + null_right
+                results.append(combined)
+
+        # Add unmatched right rows
+        for right_idx, right_row in enumerate(self._right_rows):
+            if right_idx not in right_matched:
+                null_left = [None] * len(self.left_columns)
+                combined = null_left + right_row
+                results.append(combined)
+
+        return results
+
+    def _cross_join(self) -> List[List[Any]]:
+        """CROSS JOIN: Cartesian product of both sides."""
+        results = []
+        for left_row in self._left_rows:
+            for right_row in self._right_rows:
+                combined = left_row + right_row
+                results.append(combined)
+        return results
+
+    def _evaluate_join_condition(self, left_row: List[Any], right_row: List[Any]) -> bool:
+        """Evaluate the join condition for a pair of rows."""
+        if self.join_condition is None:
+            return True  # For CROSS JOIN or joins without ON clause
+
+        from ..query.ast_nodes import BinaryOp, ColumnRef, Literal
+
+        def evaluate(node):
+            if isinstance(node, BinaryOp):
+                left = evaluate(node.left)
+                right = evaluate(node.right)
+
+                op = node.operator.upper()
+                if op == "=":
+                    return left == right
+                elif op == "!=":
+                    return left != right
+                elif op == "<":
+                    return left < right
+                elif op == ">":
+                    return left > right
+                elif op == "<=":
+                    return left <= right
+                elif op == ">=":
+                    return left >= right
+                elif op == "AND":
+                    return left and right
+                elif op == "OR":
+                    return left or right
+                else:
+                    raise ValueError(f"Unknown operator in join: {op}")
+
+            elif isinstance(node, ColumnRef):
+                # Parse qualified column name (table.column or just column)
+                col_name = node.name.lower()
+                
+                # Try to find in left columns
+                for i, left_col in enumerate(self.left_columns):
+                    if left_col.lower().endswith(col_name):
+                        return left_row[i]
+                
+                # Try to find in right columns
+                for i, right_col in enumerate(self.right_columns):
+                    if right_col.lower().endswith(col_name):
+                        return right_row[i]
+                
+                raise ValueError(f"Unknown column in join condition: {col_name}")
+
+            elif isinstance(node, Literal):
+                return node.value
+
+            else:
+                raise ValueError(f"Unknown node type in join condition: {type(node)}")
+
+        return evaluate(self.join_condition)
+
+    def __repr__(self):
+        return f"NestedLoopJoinOperator({self.join_type} JOIN)"

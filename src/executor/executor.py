@@ -4,8 +4,18 @@ Query Executor - Main Execution Engine
 Converts AST nodes into physical operator trees and executes them.
 """
 
-from typing import List, Any, Optional, Tuple
-from .operators import PhysicalOperator, ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator, NestedLoopJoinOperator, IndexRangeScanOperator)
+from typing import List, Any, Optional, Tuple, cast
+from .operators import (
+    PhysicalOperator, 
+    ScanOperator, 
+    FilterOperator, 
+    ProjectOperator, 
+    SortOperator, 
+    IndexScanOperator, 
+    IndexRangeScanOperator, 
+    AggregateOperator,
+    NestedLoopJoinOperator
+)
 from ..query.ast_nodes import (
     SelectNode,
     InsertNode,
@@ -171,6 +181,8 @@ class QueryExecutor:
             
             if plan.plan_type == 'IndexScan':
                 # Use IndexScan for point lookup
+                if plan.index_name is None:
+                    raise ExecutionError("IndexScan plan missing index_name")
                 scan = IndexScanOperator(
                     table_manager=self.table_manager,
                     index_manager=self.index_manager,
@@ -181,6 +193,8 @@ class QueryExecutor:
                 )
             elif plan.plan_type == 'IndexRangeScan':
                 # Use IndexRangeScan for range queries (>, <, >=, <=, BETWEEN)
+                if plan.index_name is None:
+                    raise ExecutionError("IndexRangeScan plan missing index_name")
                 scan = IndexRangeScanOperator(
                     table_manager=self.table_manager,
                     index_manager=self.index_manager,
@@ -240,18 +254,22 @@ class QueryExecutor:
         # 4. Sort Operator (ORDER BY clause)
         if node.order_by:
             # Convert order_by to list of (column, is_desc) tuples
-            order_by_list = []
+            order_by_list: List[Tuple[str, bool]] = []
             if isinstance(node.order_by, tuple):
                 # Parser format: (column, 'ASC'|'DESC')
                 col_name, direction = node.order_by
                 is_desc = (direction == 'DESC')
                 order_by_list.append((col_name, is_desc))
-            else:
+            elif isinstance(node.order_by, list):
                 # Executor format: list of dicts
-                for order in node.order_by:
+                order_by_items = cast(List[Any], node.order_by)
+                for order in order_by_items:
                     col_name = order["column"]
                     is_desc = order.get("desc", False)
                     order_by_list.append((col_name, is_desc))
+            else:
+                # Single value, treat as tuple
+                order_by_list.append((str(node.order_by), False))
 
             current_operator = SortOperator(
                 child=current_operator,
@@ -470,7 +488,7 @@ class QueryExecutor:
                 hint="Indexes require the index manager to be initialized. This may be a configuration issue."
             )
         
-        self.index_manager.create_index(node.index_name, node.table_name, node.column_name)
+        self.index_manager.create_index(node.index_name, node.table_name, node.column_name, self.table_manager)
         return [], None
 
     def _execute_drop_index(self, node: DropIndexNode) -> Tuple[List[List[Any]], None]:

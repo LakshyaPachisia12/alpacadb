@@ -68,7 +68,7 @@ class QueryOptimizer:
     - Join optimization
     """
     
-    def __init__(self, catalog, index_manager=None):
+    def __init__(self, catalog, index_manager=None, table_manager=None):
         """
         Initialize optimizer.
         
@@ -107,52 +107,53 @@ class QueryOptimizer:
         
         # Rule 2: Try to find a simple equality predicate on an indexed column
         index_opportunity = self._find_index_opportunity(table_name, where_clause)
-        
+
         if index_opportunity:
-            # Found a potential index. Use cost model (Phase 2) to decide.
-            index_name, column_name, search_key = index_opportunity
+            # Check if it's an equality or range predicate
+            if index_opportunity[0] == 'equality':
+                _, index_name, column_name, search_key = index_opportunity
+                
+                # Gather stats
+                table_stats = self.catalog.get_table_stats(table_name) if hasattr(self.catalog, 'get_table_stats') else None
+                index_stats = self.catalog.get_index_stats(index_name) if hasattr(self.catalog, 'get_index_stats') else None
 
-            # Gather stats
-            table_stats = self.catalog.get_table_stats(table_name) if hasattr(self.catalog, 'get_table_stats') else None
-            index_stats = self.catalog.get_index_stats(index_name) if hasattr(self.catalog, 'get_index_stats') else None
-
-            # If stats are very incomplete (no rows recorded), prefer index (rule-based fallback)
-            if not table_stats or table_stats.get('num_rows', 0) == 0:
-                use_index = True
-            else:
-                try:
-                    seq_cost = cost_seq_scan(table_stats)
-                    idx_cost = cost_index_scan(table_stats, index_stats, predicate_type='eq')
-                    
-                    # Hybrid decision: prefer index if selectivity is high (unique/near-unique)
-                    # even if costs are close, since indexes exist for a reason
-                    num_rows = table_stats.get('num_rows', 0)
-                    num_distinct = index_stats.get('num_distinct') if index_stats else None
-                    
-                    if num_distinct and num_rows > 0:
-                        selectivity = 1.0 / num_distinct
-                        # If highly selective (< 50% of rows), strongly prefer index
-                        # This balances cost-based optimization with practical index usage
-                        if selectivity < 0.5:
-                            use_index = True
-                        else:
-                            use_index = idx_cost <= seq_cost
-                    else:
-                        # No selectivity info - use pure cost comparison
-                        use_index = idx_cost <= seq_cost
-                except Exception:
-                    # Fallback to rule-based decision if cost estimation fails
+                # If stats are very incomplete (no rows recorded), prefer index (rule-based fallback)
+                if not table_stats or table_stats.get('num_rows', 0) == 0:
                     use_index = True
+                else:
+                    try:
+                        seq_cost = cost_seq_scan(table_stats)
+                        idx_cost = cost_index_scan(table_stats, index_stats, predicate_type='eq')
+                        
+                        # Hybrid decision: prefer index if selectivity is high (unique/near-unique)
+                        # even if costs are close, since indexes exist for a reason
+                        num_rows = table_stats.get('num_rows', 0)
+                        num_distinct = index_stats.get('num_distinct') if index_stats else None
+                        
+                        if num_distinct and num_rows > 0:
+                            selectivity = 1.0 / num_distinct
+                            # If highly selective (< 50% of rows), strongly prefer index
+                            # This balances cost-based optimization with practical index usage
+                            if selectivity < 0.5:
+                                use_index = True
+                            else:
+                                use_index = idx_cost <= seq_cost
+                        else:
+                            # No selectivity info - use pure cost comparison
+                            use_index = idx_cost <= seq_cost
+                    except Exception:
+                        # Fallback to rule-based decision if cost estimation fails
+                        use_index = True
 
-            if use_index:
-                return QueryPlan(
-                    plan_type='IndexScan',
-                    table_name=table_name,
-                    index_name=index_name,
-                    index_column=column_name,
-                    search_key=search_key,
-                    full_predicate=where_clause
-                )
+                if use_index:
+                    return QueryPlan(
+                        plan_type='IndexScan',
+                        table_name=table_name,
+                        index_name=index_name,
+                        index_column=column_name,
+                        search_key=search_key,
+                        full_predicate=where_clause
+                    )
             elif index_opportunity[0] == 'range':
                 _, index_name, column_name, min_key, max_key, min_inc, max_inc = index_opportunity
                 return QueryPlan(
@@ -165,9 +166,7 @@ class QueryOptimizer:
                     range_min_inclusive=min_inc,
                     range_max_inclusive=max_inc,
                     full_predicate=where_clause
-                )
-        
-        # Rule 3: No usable index, fall back to SeqScan
+                )        # Rule 3: No usable index, fall back to SeqScan
         return QueryPlan(
             plan_type='SeqScan',
             table_name=table_name,
