@@ -86,11 +86,11 @@ jobs:
       - name: Enforce minimum coverage threshold (75%)
         run: |
           coverage_percent=$(python3 - << 'EOF'
-import json
-d=json.load(open("coverage.json"))
-print(d['totals']['percent_covered'])
-EOF
-)
+          import json
+          d=json.load(open("coverage.json"))
+          print(d['totals']['percent_covered'])
+          EOF
+          )
           echo "Coverage: $coverage_percent%"
           if (( $(echo "$coverage_percent < 75" | bc -l) )); then
               echo "Coverage below 75% threshold."
