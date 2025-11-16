@@ -106,14 +106,34 @@ class ExecutionError(AlpacaDBError):
         super().__init__(message, hint=hint, error_type="ExecutionError", context=context)
 
 
+def _normalize_identifier(identifier: Optional[Any]) -> str:
+    """Best-effort extraction of the core identifier from a noisy string."""
+    if identifier is None:
+        return "unknown"
+    text = str(identifier).strip()
+    lowered = text.lower()
+    if lowered.startswith("table ") and "does not exist" in lowered:
+        for quote in ('"', "'"):
+            first = text.find(quote)
+            second = text.find(quote, first + 1) if first != -1 else -1
+            if first != -1 and second != -1:
+                return text[first + 1:second]
+        # Fall back to the word after TABLE
+        parts = text.split()
+        if len(parts) >= 2:
+            return parts[1].strip("'\"")
+    return text
+
+
 class TableNotFoundError(AlpacaDBError):
     """Table does not exist."""
     
     def __init__(self, table_name: str, hint: Optional[str] = None):
-        message = f'Table "{table_name}" does not exist.'
+        normalized_name = _normalize_identifier(table_name)
+        message = f'Table "{normalized_name}" does not exist.'
         if not hint:
             hint = f'Use \\tables to view all available tables.'
-        super().__init__(message, hint=hint, token=table_name, error_type="TableNotFoundError")
+        super().__init__(message, hint=hint, token=normalized_name, error_type="TableNotFoundError")
 
 
 class ColumnNotFoundError(AlpacaDBError):
