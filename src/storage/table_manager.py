@@ -6,7 +6,7 @@ physical storage layer (pages, serialization, I/O).
 """
 
 import struct
-from typing import List, Any
+from typing import List, Any, Optional
 from .page_manager import PageManager
 from .catalog import Catalog, TableSchema
 from .page import Page
