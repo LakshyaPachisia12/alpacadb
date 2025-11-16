@@ -357,16 +357,18 @@ class Catalog:
             return None
         return {"num_rows": schema.num_rows, "num_pages": schema.num_pages}
 
-    def update_table_stats(self, table_name: str, rows_delta: int = 0, pages_delta: int = 0) -> None:
+    def update_table_stats(self, table_name: str, rows_delta: int = 0, pages_delta: int = 0,
+                           persist: bool = True) -> None:
         """
-        Incrementally update table statistics and persist the catalog.
+        Incrementally update table statistics and optionally persist the catalog.
         """
         schema = self.get_table_schema(table_name)
         if not schema:
             return
         schema.num_rows = max(0, schema.num_rows + int(rows_delta))
         schema.num_pages = max(0, schema.num_pages + int(pages_delta))
-        self._save_catalog()
+        if persist:
+            self._save_catalog()
 
     def get_index_stats(self, index_name: str) -> Optional[Dict[str, Any]]:
         """

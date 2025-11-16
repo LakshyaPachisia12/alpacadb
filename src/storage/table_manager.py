@@ -109,6 +109,12 @@ class TableManager:
             # Determine the actual row_id in the page
             row_id = len(page.records) - 1
             self.index_manager.insert_entry(table_name, column_values, page.page_id, row_id)
+
+        # Update table statistics for optimizer hints
+        self.catalog.update_table_stats(table_name, rows_delta=1, persist=False)
+        if schema.num_rows <= 10 or schema.num_rows % 50 == 0:
+            # Persist early for small tables and occasionally for larger ones
+            self.catalog._save_catalog()
         
         print(f"✅ Inserted row into '{table_name}': {values}")
         return True
