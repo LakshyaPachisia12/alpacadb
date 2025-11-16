@@ -4,8 +4,18 @@ Query Executor - Main Execution Engine
 Converts AST nodes into physical operator trees and executes them.
 """
 
-from typing import List, Any, Optional, Tuple
-from .operators import PhysicalOperator, ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator, NestedLoopJoinOperator, IndexRangeScanOperator)
+from typing import List, Any, Optional, Tuple, cast
+from .operators import (
+    PhysicalOperator,
+    ScanOperator,
+    FilterOperator,
+    ProjectOperator,
+    SortOperator,
+    IndexScanOperator,
+    IndexRangeScanOperator,
+    AggregateOperator,
+    NestedLoopJoinOperator
+)
 from ..query.ast_nodes import (
     SelectNode,
     InsertNode,
@@ -19,9 +29,6 @@ from ..errors import (
     ExecutionError,
     TableNotFoundError,
     ColumnNotFoundError,
-    InvalidSchemaError,
-    DuplicateTableError,
-    IndexNotFoundError,
 )
 from ..optimizer import QueryOptimizer
 
@@ -35,7 +42,10 @@ class QueryExecutor:
         self.table_manager = table_manager
         self.catalog = catalog
         self.index_manager = index_manager
-        self.optimizer = QueryOptimizer(catalog, index_manager, table_manager) if index_manager else None
+        self.optimizer = (
+            QueryOptimizer(catalog, index_manager, table_manager)
+            if index_manager else None
+        )
         self.last_plan = None  # For debugging/testing - stores last query plan type
 
     def execute(self, ast_node) -> Tuple[List[List[Any]], Optional[List[str]]]:
@@ -69,7 +79,7 @@ class QueryExecutor:
     def _build_base_operator_tree(self, node: SelectNode) -> Tuple[PhysicalOperator, List[str]]:
         """
         Build the base operator tree for scans and joins.
-        
+
         Returns:
             (root_operator, all_column_names)
         """
@@ -77,43 +87,43 @@ class QueryExecutor:
         main_table_schema = self.catalog.get_table_schema(node.table_name)
         if not main_table_schema:
             raise TableNotFoundError(node.table_name)
-        
+
         main_columns = [col['name'].lower() for col in main_table_schema.columns]
-        
+
         # Create qualified column names for the main table
         main_table_alias = node.alias or node.table_name
         qualified_main_columns = [f"{main_table_alias}.{col}" for col in main_columns]
-        
+
         # Create scan for main table
         main_scan = ScanOperator(
             table_manager=self.table_manager,
             table_name=node.table_name,
             column_names=main_columns,
         )
-        
+
         current_operator = main_scan
         all_columns = qualified_main_columns.copy()
-        
+
         # Apply joins sequentially (left-deep join tree)
         for join_clause in node.joins:
             # Get schema for joined table
             join_table_schema = self.catalog.get_table_schema(join_clause.table_name)
             if not join_table_schema:
                 raise TableNotFoundError(join_clause.table_name)
-            
+
             join_columns = [col['name'].lower() for col in join_table_schema.columns]
-            
+
             # Create qualified column names for the joined table
             table_alias = join_clause.alias or join_clause.table_name
             qualified_join_columns = [f"{table_alias}.{col}" for col in join_columns]
-            
+
             # Create scan for joined table
             join_scan = ScanOperator(
                 table_manager=self.table_manager,
                 table_name=join_clause.table_name,
                 column_names=join_columns,
             )
-            
+
             # Create join operator
             current_operator = NestedLoopJoinOperator(
                 left_child=current_operator,
@@ -123,11 +133,164 @@ class QueryExecutor:
                 left_columns=all_columns,
                 right_columns=qualified_join_columns,
             )
-            
+
             # Update column list with qualified names
             all_columns.extend(qualified_join_columns)
-        
+
         return current_operator, all_columns
+
+    def _execute_select_with_joins(self, node: SelectNode) -> Tuple[List[List[Any]], List[str]]:
+        """
+        Execute a SELECT query with JOINs using qualified column names.
+        """
+        # Build base operator tree with joins
+        # Mark plan as Join for testing/debugging when joins are present
+        self.last_plan = 'Join'
+        current_operator, all_qualified_columns = self._build_base_operator_tree(node)
+
+        # Apply WHERE clause if present
+        if node.where_clause:
+            current_operator = FilterOperator(
+                child=current_operator,
+                predicate=node.where_clause,
+                column_names=all_qualified_columns,
+            )
+
+        # Apply ORDER BY if present
+        if node.order_by:
+            order_by_list: List[Tuple[str, bool]] = []
+            if isinstance(node.order_by, tuple):
+                col_name, direction = node.order_by
+                is_desc = (direction == 'DESC')
+                order_by_list.append((col_name, is_desc))
+            elif isinstance(node.order_by, list):
+                order_by_items = cast(List[Any], node.order_by)
+                for order in order_by_items:
+                    col_name = order["column"]
+                    is_desc = order.get("desc", False)
+                    order_by_list.append((col_name, is_desc))
+            else:
+                order_by_list.append((str(node.order_by), False))
+
+            current_operator = SortOperator(
+                child=current_operator,
+                order_by_columns=order_by_list,
+                column_names=all_qualified_columns,
+            )
+
+        # Apply projection
+        projection_columns = node.columns if node.columns else ["*"]
+        current_operator = ProjectOperator(
+            child=current_operator,
+            projection_columns=projection_columns,
+            input_columns=all_qualified_columns,
+        )
+
+        # Execute the operator tree
+        results = current_operator.execute()
+
+        # Determine output column names
+        if "*" in projection_columns:
+            # For *, return all columns without table prefixes
+            output_columns = [
+                col.rsplit('.', maxsplit=1)[-1]
+                for col in all_qualified_columns
+            ]
+        else:
+            # Use selected column names (strip table prefixes)
+            output_columns = [col.lower().split('.')[-1] for col in projection_columns]
+
+        return results, output_columns
+
+    def _execute_select_old_version(self, node: SelectNode) -> Tuple[List[List[Any]], List[str]]:
+        """Execute a SELECT query with JOINs using qualified column names (legacy version)."""
+        # Build base operator tree with joins (returns operator with qualified columns)
+        current_operator, all_qualified_columns = self._build_base_operator_tree(node)
+
+        # 2. Filter Operator (WHERE clause)
+        if node.where_clause:
+            current_operator = FilterOperator(
+                child=current_operator,
+                predicate=node.where_clause,
+                column_names=all_qualified_columns,
+            )
+
+        # 3. Aggregate Operator (GROUP BY and aggregate functions)
+        if node.aggregates or node.group_by:
+            group_by_columns = []
+            having_predicate = None
+
+            if node.group_by:
+                group_by_columns = node.group_by.columns
+                having_predicate = node.group_by.having_clause
+
+            current_operator = AggregateOperator(
+                child=current_operator,
+                aggregates=node.aggregates,
+                group_by_columns=group_by_columns,
+                having_predicate=having_predicate,
+                column_names=all_qualified_columns,
+            )
+
+        # 4. Sort Operator (ORDER BY clause)
+        if node.order_by:
+            # Convert order_by to list of (column, is_desc) tuples
+            order_by_list: List[Tuple[str, bool]] = []
+            if isinstance(node.order_by, tuple):
+                col_name, direction = node.order_by
+                is_desc = (direction == 'DESC')
+                order_by_list.append((col_name, is_desc))
+            elif isinstance(node.order_by, list):
+                order_by_items = cast(List[Any], node.order_by)
+                for order in order_by_items:
+                    col_name = order["column"]
+                    is_desc = order.get("desc", False)
+                    order_by_list.append((col_name, is_desc))
+            else:
+                order_by_list.append((str(node.order_by), False))
+
+            current_operator = SortOperator(
+                child=current_operator,
+                order_by_columns=order_by_list,
+                column_names=all_qualified_columns,
+            )
+
+        # 5. Project Operator (SELECT columns) - skip if we have aggregates
+        if not (node.aggregates or node.group_by):
+            # Normal projection for JOIN queries
+            projection_columns = node.columns if node.columns else ["*"]
+            current_operator = ProjectOperator(
+                child=current_operator,
+                projection_columns=projection_columns,
+                input_columns=all_qualified_columns,
+            )
+
+        # Execute the operator tree
+        results = current_operator.execute()
+
+        # Determine output column names
+        if node.aggregates or node.group_by:
+            # For aggregate queries, output columns are group-by columns + aggregate results
+            output_columns = []
+            if node.group_by:
+                output_columns.extend(node.group_by.columns)
+            # Add aggregate column names (use aliases if available, otherwise generated names)
+            for agg in node.aggregates:
+                if agg.alias:
+                    output_columns.append(agg.alias)
+                else:
+                    col_name = agg.column if agg.column else '*'
+                    output_columns.append(f"{agg.func_name}({col_name})")
+        else:
+            # For JOIN queries, map qualified names to simple names
+            if "*" in (node.columns or ["*"]):
+                # SELECT * returns all qualified columns but display without table prefix
+                output_columns = [col.lower().split('.')[-1] for col in all_qualified_columns]
+            else:
+                # Use selected columns, stripping table qualifiers for display
+                output_columns = [col.lower().split('.')[-1] for col in (node.columns or [])]
+
+        return results, output_columns
 
     def _execute_select(self, node: SelectNode) -> Tuple[List[List[Any]], List[str]]:
         """
@@ -152,10 +315,15 @@ class QueryExecutor:
                 return [[explanation + f"\n\n💰 Estimated Cost: {cost:.2f}"]], ['Query Plan']
             else:
                 return [["Optimizer not available"]], ['Query Plan']
-        
+
+        # Handle JOINs - use different code path with qualified column names
+        if hasattr(node, 'joins') and node.joins:
+            return self._execute_select_with_joins(node)
+
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:
+            # Use the TableNotFoundError helper to produce consistent message/hint
             raise TableNotFoundError(node.table_name)
 
         # Extract column names from schema
@@ -168,9 +336,11 @@ class QueryExecutor:
             # Ask optimizer for execution plan
             plan = self.optimizer.optimize(node)
             self.last_plan = plan.plan_type  # Store for testing/debugging
-            
+
             if plan.plan_type == 'IndexScan':
                 # Use IndexScan for point lookup
+                if plan.index_name is None:
+                    raise ExecutionError("IndexScan plan missing index_name")
                 scan = IndexScanOperator(
                     table_manager=self.table_manager,
                     index_manager=self.index_manager,
@@ -181,6 +351,8 @@ class QueryExecutor:
                 )
             elif plan.plan_type == 'IndexRangeScan':
                 # Use IndexRangeScan for range queries (>, <, >=, <=, BETWEEN)
+                if plan.index_name is None:
+                    raise ExecutionError("IndexRangeScan plan missing index_name")
                 scan = IndexRangeScanOperator(
                     table_manager=self.table_manager,
                     index_manager=self.index_manager,
@@ -224,11 +396,11 @@ class QueryExecutor:
         if node.aggregates or node.group_by:
             group_by_columns = []
             having_predicate = None
-            
+
             if node.group_by:
                 group_by_columns = node.group_by.columns
                 having_predicate = node.group_by.having_clause
-            
+
             current_operator = AggregateOperator(
                 child=current_operator,
                 aggregates=node.aggregates,
@@ -240,18 +412,22 @@ class QueryExecutor:
         # 4. Sort Operator (ORDER BY clause)
         if node.order_by:
             # Convert order_by to list of (column, is_desc) tuples
-            order_by_list = []
+            order_by_list: List[Tuple[str, bool]] = []
             if isinstance(node.order_by, tuple):
                 # Parser format: (column, 'ASC'|'DESC')
                 col_name, direction = node.order_by
                 is_desc = (direction == 'DESC')
                 order_by_list.append((col_name, is_desc))
-            else:
+            elif isinstance(node.order_by, list):
                 # Executor format: list of dicts
-                for order in node.order_by:
+                order_by_items = cast(List[Any], node.order_by)
+                for order in order_by_items:
                     col_name = order["column"]
                     is_desc = order.get("desc", False)
                     order_by_list.append((col_name, is_desc))
+            else:
+                # Single value, treat as tuple
+                order_by_list.append((str(node.order_by), False))
 
             current_operator = SortOperator(
                 child=current_operator,
@@ -304,7 +480,7 @@ class QueryExecutor:
         # Get table schema to validate
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:
-            raise ValueError(f"Table '{node.table_name}' does not exist")
+            raise TableNotFoundError(node.table_name)
 
         # Insert the row
         self.table_manager.insert_row(node.table_name, node.values)
@@ -393,11 +569,11 @@ class QueryExecutor:
         self.table_manager._clear_table(node.table_name)
         for row in all_rows:
             self.table_manager.insert_row(node.table_name, row)
-        
+
         # Rebuild indexes to maintain correctness
-        # TODO: Replace with proper B-Tree delete in Phase 3
+        # Pass table_manager so indexes can be rebuilt with current data
         if self.index_manager:
-            self.index_manager.rebuild_indexes_for_table(node.table_name)
+            self.index_manager.rebuild_indexes_for_table(node.table_name, self.table_manager)
 
         print(f"Updated {updated_count} row(s).")
         return [], None
@@ -453,11 +629,11 @@ class QueryExecutor:
         self.table_manager._clear_table(node.table_name)
         for row in rows_to_keep:
             self.table_manager.insert_row(node.table_name, row)
-        
+
         # Rebuild indexes to maintain correctness
-        # TODO: Replace with proper B-Tree delete in Phase 3
+        # Pass table_manager so indexes can be rebuilt with current data
         if self.index_manager:
-            self.index_manager.rebuild_indexes_for_table(node.table_name)
+            self.index_manager.rebuild_indexes_for_table(node.table_name, self.table_manager)
 
         print(f"Deleted {deleted_count} row(s).")
         return [], None
@@ -469,8 +645,8 @@ class QueryExecutor:
                 "Index manager is not available",
                 hint="Indexes require the index manager to be initialized. This may be a configuration issue."
             )
-        
-        self.index_manager.create_index(node.index_name, node.table_name, node.column_name)
+
+        self.index_manager.create_index(node.index_name, node.table_name, node.column_name, self.table_manager)
         return [], None
 
     def _execute_drop_index(self, node: DropIndexNode) -> Tuple[List[List[Any]], None]:
@@ -480,6 +656,6 @@ class QueryExecutor:
                 "Index manager is not available",
                 hint="Dropping indexes requires the index manager to be initialized. This may be a configuration issue."
             )
-        
+
         self.index_manager.drop_index(node.index_name, node.table_name)
         return [], None

@@ -142,7 +142,9 @@ class TestE2EQueryWorkflows:
         self._execute_sql(executor, "INSERT INTO products VALUES (1, 'ABC123');")
         self._execute_sql(executor, "INSERT INTO products VALUES (2, 'XYZ789');")
         
-        index_manager.create_index('idx_code', 'products', 'code')
+        # Create index after data insertion, passing table_manager to build from existing data
+        table_manager = temp_db['table_manager']
+        index_manager.create_index('idx_code', 'products', 'code', table_manager)
         
         # SELECT with index
         rows_with_index, _ = self._execute_sql(
@@ -176,7 +178,8 @@ class TestE2EQueryWorkflows:
             {'name': 'status', 'type': 'STRING', 'nullable': True}
         ]
         catalog.create_table('orders', columns)
-        index_manager.create_index('idx_status', 'orders', 'status')
+        table_manager = temp_db['table_manager']
+        index_manager.create_index('idx_status', 'orders', 'status', table_manager)
         
         # INSERT
         self._execute_sql(executor, "INSERT INTO orders VALUES (1, 'pending');")
@@ -223,7 +226,8 @@ class TestE2EQueryWorkflows:
             {'name': 'category', 'type': 'STRING', 'nullable': True}
         ]
         catalog.create_table('items', columns)
-        index_manager.create_index('idx_category', 'items', 'category')
+        table_manager = temp_db['table_manager']
+        index_manager.create_index('idx_category', 'items', 'category', table_manager)
         
         # INSERT
         self._execute_sql(executor, "INSERT INTO items VALUES (1, 'electronics');")
@@ -285,7 +289,8 @@ class TestE2EQueryWorkflows:
         assert len(rows) == 1
         
         # 4. CREATE INDEX on email
-        index_manager.create_index('idx_email', 'users', 'email')
+        table_manager = temp_db['table_manager']
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
         
         # 5. Query with index
         rows, _ = self._execute_sql(
@@ -358,7 +363,8 @@ class TestE2EQueryWorkflows:
             )
         
         # Create index
-        index_manager.create_index('idx_product', 'inventory', 'product')
+        table_manager = temp_db['table_manager']
+        index_manager.create_index('idx_product', 'inventory', 'product', table_manager)
         
         # SELECT with projection and WHERE (uses index)
         rows, columns_out = self._execute_sql(
@@ -397,8 +403,9 @@ class TestE2EQueryWorkflows:
             )
         
         # Create indexes on both columns
-        index_manager.create_index('idx_name', 'staff', 'name')
-        index_manager.create_index('idx_dept', 'staff', 'dept')
+        table_manager = temp_db['table_manager']
+        index_manager.create_index('idx_name', 'staff', 'name', table_manager)
+        index_manager.create_index('idx_dept', 'staff', 'dept', table_manager)
         
         # Query by name - uses idx_name
         rows, _ = self._execute_sql(
