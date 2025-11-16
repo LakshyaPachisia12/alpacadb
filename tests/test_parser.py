@@ -200,11 +200,3 @@ def test_parse_select_group_by_multiple():
 
 # TODO: Implement HAVING clause support in parser
 # The parser currently doesn't handle aggregate functions in HAVING clauses
-# def test_parse_select_having():
-#     """Test SELECT with HAVING clause."""
-#     query = "SELECT department, COUNT(*) FROM employees GROUP BY department HAVING COUNT(*) > 5"
-#     ast = parse_query(query)
-#     
-#     assert isinstance(ast, SelectNode)
-#     assert ast.group_by is not None
-#     assert ast.group_by.having_clause is not None
