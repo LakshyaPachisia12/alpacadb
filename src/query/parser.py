@@ -72,58 +72,99 @@ class Parser:
         token = self._peek()
         
         # DDL statements
-        if token.type == TokenType.CREATE:
+        if self._check(TokenType.CREATE):
+            self._consume(TokenType.CREATE)
             return self._create_statement()
-        elif token.type == TokenType.DROP:
+        elif self._check(TokenType.DROP):
+            self._consume(TokenType.DROP)
             return self._drop_statement()
-        
+            
         # DML statements
-        elif token.type == TokenType.SELECT:
+        elif self._check(TokenType.SELECT):
+            self._consume(TokenType.SELECT)
             return self._select_statement()
-        elif token.type == TokenType.INSERT:
+        elif self._check(TokenType.INSERT):
+            self._consume(TokenType.INSERT)
             return self._insert_statement()
-        elif token.type == TokenType.UPDATE:
+        elif self._check(TokenType.UPDATE):
+            self._consume(TokenType.UPDATE)
             return self._update_statement()
-        elif token.type == TokenType.DELETE:
+        elif self._check(TokenType.DELETE):
+            self._consume(TokenType.DELETE)
             return self._delete_statement()
         
         # Transaction statements
-        elif token.type == TokenType.BEGIN:
+        elif self._check(TokenType.BEGIN):
             self._consume(TokenType.BEGIN)
             return TransactionNode('BEGIN')
-        elif token.type == TokenType.COMMIT:
+        elif self._check(TokenType.COMMIT):
             self._consume(TokenType.COMMIT)
             return TransactionNode('COMMIT')
-        elif token.type == TokenType.ROLLBACK:
+        elif self._check(TokenType.ROLLBACK):
             self._consume(TokenType.ROLLBACK)
             return TransactionNode('ROLLBACK')
         
         else:
             raise ParseError(
-                f"Unexpected token '{token.lexeme}' at line {token.line}, column {token.column}. "
-                f"Expected statement keyword (CREATE, SELECT, INSERT, etc.)"
+                f"Unexpected token '{token.lexeme}' at line {token.line}, "
+                f"column {token.column}. Expected statement keyword "
+                f"(CREATE, SELECT, INSERT, etc.)"
             )
+        
+    def _create_statement(self) -> ASTNode:
+        """Parse CREATE TABLE or CREATE INDEX statement."""
+        # CREATE token already consumed by _statement()
+        next_token = self._peek()
+        
+        if next_token.type == TokenType.TABLE:
+            return self._create_table()
+        elif next_token.type == TokenType.INDEX:
+            return self._create_index_statement()
+        else:
+            raise ParseError("Expected 'TABLE' or 'INDEX' after CREATE")
+            
+    def _create_index_statement(self) -> CreateIndexNode:
+        """Parse CREATE INDEX statement."""
+        self._consume(TokenType.INDEX)
+        index_name = self._consume(TokenType.IDENTIFIER).value
+        
+        self._consume(TokenType.ON)
+        table_name = self._consume(TokenType.IDENTIFIER).value
+        
+        self._consume(TokenType.LEFT_PAREN)
+        column_name = self._consume(TokenType.IDENTIFIER).value
+        self._consume(TokenType.RIGHT_PAREN)
+        
+        # Optional USING clause (for future index types)
+        if self._check(TokenType.USING):
+            self._consume(TokenType.USING)
+            _index_type = self._consume(TokenType.IDENTIFIER).value
+            # Currently ignored, but can be extended in future
+            
+        return CreateIndexNode(index_name, table_name, column_name)
+        
+    def _drop_statement(self) -> ASTNode:
+        """Parse DROP TABLE or DROP INDEX statement."""
+        # DROP token already consumed by _statement()
+        next_token = self._peek()
+        
+        if next_token.type == TokenType.TABLE:
+            return self._drop_table()
+        elif next_token.type == TokenType.INDEX:
+            return self._drop_index_statement()
+        else:
+            raise ParseError("Expected 'TABLE' or 'INDEX' after DROP")
+            
+    def _drop_index_statement(self) -> DropIndexNode:
+        """Parse DROP INDEX statement."""
+        self._consume(TokenType.INDEX)
+        index_name = self._consume(TokenType.IDENTIFIER).value
+        
+        self._consume(TokenType.ON)
+        table_name = self._consume(TokenType.IDENTIFIER).value
+        return DropIndexNode(index_name, table_name)
     
     # ==================== DDL Parsing ====================
-    
-    def _create_statement(self) -> ASTNode:
-        """
-        Parse CREATE statement.
-        
-        Grammar:
-            CREATE TABLE table_name (column_defs)
-            CREATE INDEX index_name ON table_name (column)
-        """
-        self._consume(TokenType.CREATE)
-        
-        if self._check(TokenType.TABLE):
-            return self._create_table()
-        elif self._check(TokenType.INDEX):
-            return self._create_index()
-        else:
-            raise ParseError(
-                f"Expected TABLE or INDEX after CREATE at line {self._peek().line}"
-            )
     
     def _create_table(self) -> CreateTableNode:
         """
@@ -249,14 +290,13 @@ class Parser:
         
         return CreateIndexNode(index_name, table_name, column_name)
     
-    def _drop_statement(self) -> DropTableNode:
+    def _drop_table(self) -> DropTableNode:
         """
         Parse: DROP TABLE table_name
         
         Example:
             DROP TABLE users
         """
-        self._consume(TokenType.DROP)
         self._consume(TokenType.TABLE)
         
         table_name_token = self._consume(TokenType.IDENTIFIER)
@@ -277,7 +317,7 @@ class Parser:
         Example:
             INSERT INTO users VALUES (1, 'Alice', 25)
         """
-        self._consume(TokenType.INSERT)
+        # INSERT token already consumed by _statement()
         self._consume(TokenType.INTO)
         
         # Table name
@@ -315,7 +355,7 @@ class Parser:
             SELECT id, name FROM users WHERE age > 18
             SELECT * FROM users ORDER BY name ASC
         """
-        self._consume(TokenType.SELECT)
+        # SELECT token already consumed by _statement()
         
         # Columns (* or col1, col2, ...)
         columns = []
@@ -376,7 +416,7 @@ class Parser:
         Example:
             UPDATE users SET age=26, name='Bob' WHERE id=1
         """
-        self._consume(TokenType.UPDATE)
+        # UPDATE token already consumed by _statement()
         
         # Table name
         table_name_token = self._consume(TokenType.IDENTIFIER)
@@ -419,7 +459,7 @@ class Parser:
         Example:
             DELETE FROM users WHERE age < 18
         """
-        self._consume(TokenType.DELETE)
+        # DELETE token already consumed by _statement()
         self._consume(TokenType.FROM)
         
         # Table name

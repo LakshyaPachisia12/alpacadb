@@ -6,7 +6,7 @@ physical storage layer (pages, serialization, I/O).
 """
 
 import struct
-from typing import List, Any
+from typing import List, Any, Optional
 from .page_manager import PageManager
 from .catalog import Catalog, TableSchema
 from .page import Page
@@ -29,16 +29,18 @@ class TableManager:
     TYPE_BOOLEAN = 3
     TYPE_NULL = 0
 
-    def __init__(self, page_manager: PageManager, catalog: Catalog):
+    def __init__(self, page_manager: PageManager, catalog: Catalog, index_manager=None):
         """
         Initialize table manager.
 
         Args:
             page_manager: PageManager for I/O operations
             catalog: Catalog for schema lookups
+            index_manager: Optional IndexManager for maintaining indexes
         """
         self.page_manager = page_manager
         self.catalog = catalog
+        self.index_manager = index_manager
 
     def insert_row(self, table_name: str, values: List[Any]) -> bool:
         """
@@ -91,6 +93,19 @@ class TableManager:
 
         # Step 6: Write page to disk
         self.page_manager.write_page(page)
+
+        # Step 7: Update indexes if index_manager is available
+        if self.index_manager:
+            # Build column_values dict for index maintenance
+            column_values = {}
+            for i, col in enumerate(schema.columns):
+                column_values[col['name']] = values[i]
+            
+            # Find row_id (position in page.records)
+            row_id = len(page.records) - 1
+            
+            # Insert into all relevant indexes
+            self.index_manager.insert_entry(table_name, column_values, page.page_id, row_id)
 
         print(f"✅ Inserted row into '{table_name}': {values}")
         return True
@@ -273,6 +288,50 @@ class TableManager:
 
         return page
 
+    def fetch_row_by_location(self, table_name: str, page_id: int, row_id: int) -> Optional[List[Any]]:
+        """
+        Fetch a single row by its physical location (page_id, row_id).
+        
+        This is used by IndexScanOperator to retrieve rows found via index lookups.
+        
+        Args:
+            table_name: Name of the table
+            page_id: Page ID where the row is stored
+            row_id: Row ID (offset) within the page's records list
+            
+        Returns:
+            Row as list of values, or None if not found/invalid
+        """
+        # Step 1: Validate table exists and get schema
+        schema = self.catalog.get_table_schema(table_name)
+        if not schema:
+            print(f"⚠️  Warning: Table '{table_name}' does not exist")
+            return None
+        
+        # Step 2: Read the page
+        try:
+            page = self.page_manager.read_page(page_id)
+            if not page:
+                print(f"⚠️  Warning: Page {page_id} not found")
+                return None
+        except Exception as e:
+            print(f"⚠️  Warning: Failed to read page {page_id}: {e}")
+            return None
+        
+        # Step 3: Validate row_id is within bounds
+        if row_id < 0 or row_id >= len(page.records):
+            print(f"⚠️  Warning: Invalid row_id {row_id} (page has {len(page.records)} records)")
+            return None
+        
+        # Step 4: Deserialize the specific record
+        try:
+            record_bytes = page.records[row_id]
+            row = self._deserialize_row(schema, record_bytes)
+            return row
+        except Exception as e:
+            print(f"⚠️  Warning: Failed to deserialize row at page {page_id}, row {row_id}: {e}")
+            return None
+
     def __repr__(self) -> str:
         """String representation for debugging."""
         return f"TableManager(catalog={self.catalog})"
@@ -282,17 +341,16 @@ class TableManager:
         Clear all data from a table (used by UPDATE/DELETE).
         Resets the table to an empty state.
         """
-        schema = self.catalog.get_table(table_name)
+        schema = self.catalog.get_table_schema(table_name)
         if not schema:
             raise ValueError(f"Table '{table_name}' does not exist")
 
         # Allocate a fresh empty page for the table
-        first_page_id = self.page_manager.allocate_page()
-        first_page = self.page_manager.read_page(first_page_id)
+        first_page = self.page_manager.allocate_page()
         first_page.records = []
-        first_page.next_page_id = -1
-        self.page_manager.write_page(first_page_id, first_page)
+        first_page.next_page_id = None
+        self.page_manager.write_page(first_page)
 
         # Update catalog with new first page
-        schema.first_page_id = first_page_id
+        schema.first_page_id = first_page.page_id
         self.catalog._save_catalog()

@@ -11,6 +11,33 @@ from typing import List, Optional, Any, Iterator
 from abc import ABC, abstractmethod
 
 
+class ReverseCompare:
+    """
+    Wrapper class for reverse comparison in sorting.
+    Used to handle DESC ordering for non-numeric types.
+    """
+    def __init__(self, value):
+        self.value = value
+    
+    def __lt__(self, other):
+        return self.value > other.value
+    
+    def __le__(self, other):
+        return self.value >= other.value
+    
+    def __gt__(self, other):
+        return self.value < other.value
+    
+    def __ge__(self, other):
+        return self.value <= other.value
+    
+    def __eq__(self, other):
+        return self.value == other.value
+    
+    def __ne__(self, other):
+        return self.value != other.value
+
+
 class PhysicalOperator(ABC):
     """Base class for all physical operators"""
 
@@ -275,29 +302,36 @@ class SortOperator(PhysicalOperator):
         if not self.order_by_columns:
             return rows
 
-        # Build sort key function
+        # Build sort key function with proper DESC handling
         def sort_key(row):
             keys = []
             for col_name, is_desc in self.order_by_columns:
                 col_idx = self.column_names.index(col_name.lower())
                 value = row[col_idx]
+                
                 # Handle None values (put them last)
                 if value is None:
-                    value = float("inf") if not is_desc else float("-inf")
-                keys.append(value)
+                    # For DESC, None should be at the beginning (smallest)
+                    # For ASC, None should be at the end (largest)
+                    value = float("-inf") if is_desc else float("inf")
+                
+                # For DESC columns, negate numeric values or use reverse comparison
+                # We'll use a tuple trick: (is_desc, value) and let Python handle it
+                # For DESC: negate if numeric, otherwise we need custom comparison
+                if is_desc:
+                    # Negate numeric values for DESC ordering
+                    if isinstance(value, (int, float)):
+                        keys.append(-value)
+                    else:
+                        # For strings, we can't negate, so we'll use a wrapper
+                        # that reverses comparison
+                        keys.append(ReverseCompare(value))
+                else:
+                    keys.append(value)
             return keys
 
-        # Sort with reverse handling
-        # We need to handle DESC for individual columns
+        # Sort with the multi-key function
         sorted_rows = sorted(rows, key=sort_key)
-
-        # Handle DESC properly by reversing if needed
-        # (This is simplified - real DBs handle multi-column DESC more elegantly)
-        if (
-            self.order_by_columns and self.order_by_columns[0][1]
-        ):  # First column is DESC
-            sorted_rows.reverse()
-
         return sorted_rows
 
     def next(self) -> Optional[List[Any]]:
@@ -316,3 +350,73 @@ class SortOperator(PhysicalOperator):
 
     def __repr__(self):
         return f"SortOperator(order_by={self.order_by_columns})"
+
+
+class IndexScanOperator(PhysicalOperator):
+    """
+    Index Scan Operator
+    Uses a B-Tree index to find rows matching a key.
+    
+    This operator leverages indexes for point lookups (equality predicates).
+    Much faster than sequential scan for large tables.
+    Handles duplicate keys by returning all matching rows.
+    """
+
+    def __init__(self, table_manager, index_manager, table_name: str, 
+                 index_name: str, key: Any, column_names: List[str]):
+        """
+        Initialize index scan operator.
+        
+        Args:
+            table_manager: TableManager for fetching rows
+            index_manager: IndexManager for index lookups
+            table_name: Name of the table
+            index_name: Name of the index to use
+            key: Value to search for in the index
+            column_names: Column names in order (for consistency with other operators)
+        """
+        super().__init__()
+        self.table_manager = table_manager
+        self.index_manager = index_manager
+        self.table_name = table_name
+        self.index_name = index_name
+        self.key = key
+        self.column_names = column_names
+        self._rows = []
+        self._current_idx = 0
+
+    def open(self):
+        super().open()
+        # Perform index lookup - get ALL matching rows (handles duplicates)
+        results = self.index_manager.search_index_all(self.index_name, self.key)
+        
+        # Fetch all matching rows
+        self._rows = []
+        for page_id, row_id in results:
+            row = self.table_manager.fetch_row_by_location(
+                self.table_name, page_id, row_id
+            )
+            if row:
+                self._rows.append(row)
+        
+        self._current_idx = 0
+
+    def next(self) -> Optional[List[Any]]:
+        if not self._opened:
+            raise RuntimeError("Operator not opened")
+        
+        # Return rows one by one
+        if self._current_idx >= len(self._rows):
+            return None
+        
+        row = self._rows[self._current_idx]
+        self._current_idx += 1
+        return row
+
+    def close(self):
+        super().close()
+        self._rows = []
+        self._current_idx = 0
+
+    def __repr__(self):
+        return f"IndexScanOperator(index={self.index_name}, key={self.key})"

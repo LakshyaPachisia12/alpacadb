@@ -13,6 +13,7 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.storage import PageManager, Catalog, TableManager
+from src.storage.indexing.index_manager import IndexManager
 from src.query import Lexer, Parser, LexerError, ParseError
 from src.query.ast_nodes import *
 from src.executor import QueryExecutor
@@ -27,6 +28,7 @@ class AlpacaDBCLI:
         self.page_manager: Optional[PageManager] = None
         self.catalog: Optional[Catalog] = None
         self.table_manager: Optional[TableManager] = None
+        self.index_manager: Optional[IndexManager] = None
         self.running = True
         self.executor: Optional[QueryExecutor] = None
 
@@ -38,8 +40,9 @@ class AlpacaDBCLI:
         try:
             self.page_manager = PageManager(self.db_path)
             self.catalog = Catalog(self.page_manager)
-            self.table_manager = TableManager(self.page_manager, self.catalog)
-            self.executor = QueryExecutor(self.table_manager, self.catalog)
+            self.index_manager = IndexManager(self.catalog, self.page_manager)
+            self.table_manager = TableManager(self.page_manager, self.catalog, self.index_manager)
+            self.executor = QueryExecutor(self.table_manager, self.catalog, self.index_manager)
             print(f"Connected to: {self.db_path}")
         except Exception as e:
             print(f"❌ Failed to initialize database: {e}")
@@ -242,11 +245,43 @@ Examples:
 
         # DDL: CREATE INDEX
         elif isinstance(ast, CreateIndexNode):
+            if self.index_manager:
+                # Use IndexManager for full index creation with B-Tree
+                self.index_manager.create_index(
+                    ast.index_name,
+                    ast.table_name,
+                    ast.column_name
+                )
+                success = True
+            else:
+                # Fallback to catalog-only creation
+                success = self.catalog.create_index(
+                    ast.index_name,
+                    ast.table_name,
+                    ast.column_name
+                )
             return {
-                "type": "CREATE_INDEX",
-                "success": True,
-                "index": ast.index_name,
-                "note": "Index creation queued (implementation in Sprint 4)",
+                'type': 'CREATE_INDEX',
+                'success': success,
+                'index': ast.index_name,
+                'table': ast.table_name,
+                'column': ast.column_name
+            }
+        
+        # DDL: DROP INDEX
+        elif isinstance(ast, DropIndexNode):
+            if self.index_manager:
+                # Use IndexManager to properly clean up B-Tree
+                self.index_manager.drop_index(ast.index_name, ast.table_name)
+                success = True
+            else:
+                # Fallback to catalog-only drop
+                success = self.catalog.drop_index(ast.index_name)
+            return {
+                'type': 'DROP_INDEX',
+                'success': success,
+                'index': ast.index_name,
+                'table': ast.table_name
             }
 
         # DML: INSERT
@@ -403,11 +438,19 @@ Examples:
                 print(f"❌ Failed to drop table '{result['table']}'")
 
         # CREATE INDEX
-        elif result_type == "CREATE_INDEX":
-            print(f"✅ Index '{result['index']}' created")
-            if "note" in result:
-                print(f"   Note: {result['note']}")
-
+        elif result_type == 'CREATE_INDEX':
+            if result['success']:
+                print(f"✅ Index '{result['index']}' created on {result['table']}.{result['column']}")
+            else:
+                print(f"❌ Failed to create index '{result['index']}'")
+        
+        # DROP INDEX
+        elif result_type == 'DROP_INDEX':
+            if result['success']:
+                print(f"✅ Index '{result['index']}' dropped")
+            else:
+                print(f"❌ Failed to drop index '{result['index']}'")
+        
         # INSERT
         elif result_type == "INSERT":
             if result["success"]:
@@ -497,8 +540,14 @@ Examples:
 
     def _should_use_executor(self, ast: ASTNode) -> bool:
         """Decide whether to use new executor or legacy execution."""
-        # Start with SELECT only to test
-        return isinstance(ast, SelectNode)
+        # Route all main query types to executor
+        return isinstance(ast, (
+            SelectNode,
+            CreateTableNode,
+            InsertNode,
+            UpdateNode,
+            DeleteNode,
+        ))
     
     def _execute_with_executor(self, ast: ASTNode):
         """Execute AST using the new QueryExecutor."""
@@ -520,7 +569,26 @@ Examples:
                     "table": ast.table_name,
                     "rows": 1,
                 }
-            # Add other query types as needed
+            elif isinstance(ast, CreateTableNode):
+                return {
+                    "type": "CREATE_TABLE",
+                    "success": True,
+                    "table": ast.table_name,
+                }
+            elif isinstance(ast, UpdateNode):
+                return {
+                    "type": "UPDATE",
+                    "success": True,
+                    "table": ast.table_name,
+                }
+            elif isinstance(ast, DeleteNode):
+                return {
+                    "type": "DELETE",
+                    "success": True,
+                    "table": ast.table_name,
+                }
+            else:
+                raise ValueError(f"Unsupported AST type: {type(ast).__name__}")
             
         except Exception as e:
             raise Exception(f"Executor error: {e}")
