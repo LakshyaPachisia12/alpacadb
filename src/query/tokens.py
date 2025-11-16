@@ -53,6 +53,17 @@ class TokenType(Enum):
     GROUP = auto()
     HAVING = auto()
     
+    # Aggregate Functions
+    COUNT = auto()
+    SUM = auto()
+    AVG = auto()
+    MIN = auto()
+    MAX = auto()
+    
+    # Grouping Keywords
+    GROUP = auto()
+    HAVING = auto()
+    
     # Clauses
     FROM = auto()
     WHERE = auto()

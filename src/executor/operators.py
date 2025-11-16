@@ -442,6 +442,91 @@ class IndexScanOperator(PhysicalOperator):
         return f"IndexScanOperator(index={self.index_name}, key={self.key})"
 
 
+class IndexRangeScanOperator(PhysicalOperator):
+    """
+    Phase 3: Index Range Scan Operator
+    Uses a B-Tree index to find rows matching a range predicate.
+    
+    Supports: BETWEEN, >, <, >=, <= operations
+    Uses leaf node linking for efficient range traversal.
+    """
+
+    def __init__(self, table_manager, index_manager, table_name: str, 
+                 index_name: str, start_key: Any, end_key: Any,
+                 include_start: bool = True, include_end: bool = True,
+                 column_names: List[str] = None):
+        """
+        Initialize index range scan operator.
+        
+        Args:
+            table_manager: TableManager for fetching rows
+            index_manager: IndexManager for index lookups
+            table_name: Name of the table
+            index_name: Name of the index to use
+            start_key: Start of range (None = -infinity)
+            end_key: End of range (None = +infinity)
+            include_start: Whether to include start_key (>= vs >)
+            include_end: Whether to include end_key (<= vs <)
+            column_names: Column names in order
+        """
+        super().__init__()
+        self.table_manager = table_manager
+        self.index_manager = index_manager
+        self.table_name = table_name
+        self.index_name = index_name
+        self.start_key = start_key
+        self.end_key = end_key
+        self.include_start = include_start
+        self.include_end = include_end
+        self.column_names = column_names or []
+        self._rows = []
+        self._current_idx = 0
+
+    def open(self):
+        super().open()
+        # Perform range index lookup
+        results = self.index_manager.range_search_index(
+            self.index_name, 
+            self.start_key, 
+            self.end_key,
+            self.include_start,
+            self.include_end
+        )
+        
+        # Fetch all matching rows
+        self._rows = []
+        for page_id, row_id in results:
+            row = self.table_manager.fetch_row_by_location(
+                self.table_name, page_id, row_id
+            )
+            if row:
+                self._rows.append(row)
+        
+        self._current_idx = 0
+
+    def next(self) -> Optional[List[Any]]:
+        if not self._opened:
+            raise RuntimeError("Operator not opened")
+        
+        # Return rows one by one
+        if self._current_idx >= len(self._rows):
+            return None
+        
+        row = self._rows[self._current_idx]
+        self._current_idx += 1
+        return row
+
+    def close(self):
+        super().close()
+        self._rows = []
+        self._current_idx = 0
+
+    def __repr__(self):
+        op_start = ">=" if self.include_start else ">"
+        op_end = "<=" if self.include_end else "<"
+        return f"IndexRangeScanOperator(index={self.index_name}, {self.start_key} {op_start} key {op_end} {self.end_key})"
+
+
 class AggregateOperator(PhysicalOperator):
     """
     Aggregation Operator
