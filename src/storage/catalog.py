@@ -7,7 +7,7 @@ allows the database to interpret raw bytes as meaningful tables.
 """
 
 import json
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from .page_manager import PageManager
 from .page import Page, PAGE_TYPE_META
 
@@ -17,12 +17,16 @@ class IndexInfo:
     Describes an index on a table column.
     """
     def __init__(self, index_name: str, table_name: str, column_name: str, 
-                 index_type: str = "B-Tree", root_page_id: Optional[int] = None):
+                 index_type: str = "B-Tree", root_page_id: Optional[int] = None,
+                 stats: Optional[Dict[str, Any]] = None):
         self.index_name = index_name
         self.table_name = table_name
         self.column_name = column_name
         self.index_type = index_type
         self.root_page_id = root_page_id
+        # Per-index statistics on the indexed column
+        # keys: num_distinct, null_count, min_value, max_value
+        self.stats: Dict[str, Any] = stats or {}
 
     def to_dict(self) -> Dict:
         return {
@@ -30,7 +34,8 @@ class IndexInfo:
             "table_name": self.table_name,
             "column_name": self.column_name,
             "index_type": self.index_type,
-            "root_page_id": self.root_page_id
+            "root_page_id": self.root_page_id,
+            "stats": self.stats,
         }
 
     @classmethod
@@ -40,7 +45,8 @@ class IndexInfo:
             data["table_name"],
             data["column_name"],
             data["index_type"],
-            data["root_page_id"]
+            data.get("root_page_id"),
+            data.get("stats", {}),
         )
 
 
@@ -66,13 +72,18 @@ class TableSchema:
         self.table_name = table_name
         self.columns = columns
         self.first_page_id: Optional[int] = None  # Where table data starts
+        # Basic table-level statistics (Phase 2)
+        self.num_rows: int = 0
+        self.num_pages: int = 0
     
     def to_dict(self) -> dict:
         """Serialize schema to dictionary for JSON storage."""
         return {
             'table_name': self.table_name,
             'columns': self.columns,
-            'first_page_id': self.first_page_id
+            'first_page_id': self.first_page_id,
+            'num_rows': self.num_rows,
+            'num_pages': self.num_pages,
         }
     
     @classmethod
@@ -80,6 +91,8 @@ class TableSchema:
         """Deserialize schema from dictionary."""
         schema = cls(data['table_name'], data['columns'])
         schema.first_page_id = data.get('first_page_id')
+        schema.num_rows = int(data.get('num_rows', 0))
+        schema.num_pages = int(data.get('num_pages', 0))
         return schema
     
     def __repr__(self) -> str:
@@ -324,3 +337,35 @@ class Catalog:
     def __repr__(self) -> str:
         """String representation for debugging."""
         return f"Catalog(tables={list(self.tables.keys())}, indexes={list(self.indexes.keys())})"
+
+    # ==================== Statistics Helpers (Phase 2) ====================
+
+    def get_table_stats(self, table_name: str) -> Optional[Dict[str, int]]:
+        """
+        Return basic statistics for a table: num_rows, num_pages.
+        """
+        schema = self.get_table_schema(table_name)
+        if not schema:
+            return None
+        return {"num_rows": schema.num_rows, "num_pages": schema.num_pages}
+
+    def update_table_stats(self, table_name: str, rows_delta: int = 0, pages_delta: int = 0) -> None:
+        """
+        Incrementally update table statistics and persist the catalog.
+        """
+        schema = self.get_table_schema(table_name)
+        if not schema:
+            return
+        schema.num_rows = max(0, schema.num_rows + int(rows_delta))
+        schema.num_pages = max(0, schema.num_pages + int(pages_delta))
+        self._save_catalog()
+
+    def get_index_stats(self, index_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Return statistics for an index on a specific column.
+        keys: num_distinct, null_count, min_value, max_value
+        """
+        idx = self.get_index(index_name)
+        if not idx:
+            return None
+        return idx.stats or {}

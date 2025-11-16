@@ -202,7 +202,7 @@ class AlpacaDBCLI:
             print("No tables in database")
             return
 
-        print("\n📊 Available tables:")
+        print("\nAvailable tables:")
         print("┌" + "─" * 50 + "┐")
         print(f"│ {'Table Name':<30} {'Columns':<18} │")
         print("├" + "─" * 50 + "┤")
@@ -495,24 +495,27 @@ Examples:
             if self._should_use_executor(ast):
                 # Use new executor path
                 result = self._execute_with_executor(ast)
+                print(f"(Executed using new executor)")
             else:
                 # Use legacy path
                 result = self._execute_ast(ast)
+                print(f"(Executed using legacy path)")
             # Display result
             elapsed = (time.time() - start_time) * 1000  # milliseconds
             self._display_result(result, elapsed)
 
-        except AlpacaDBError as e:
-            # All AlpacaDB errors already have nice formatting
-            print(str(e))
+        except LexerError as e:
+            print(f"❌ Lexer Error: {e}")
+        except ParseError as e:
+            print(f"❌ Syntax Error: {e}")
         except Exception as e:
-            # Internal errors - show a user-friendly message
             print(f"❌ ERROR [Internal]: An unexpected error occurred")
             print(f"💡 HINT: This may be a bug. Please report this issue.")
             print(f"📋 Details: {str(e)}")
-            # In debug mode, could print traceback here
-            import traceback
-            # print(traceback.format_exc())  # Uncomment for debugging
+
+        except AlpacaDBError as e:
+            # All AlpacaDB errors already have nice formatting
+            print(str(e))
 
     def _execute_ast(self, ast: ASTNode):
         """Execute parsed AST node."""

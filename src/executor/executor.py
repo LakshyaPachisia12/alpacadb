@@ -330,7 +330,7 @@ class QueryExecutor:
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:
-            raise TableNotFoundError(node.table_name)
+            raise ValueError(f"Table '{node.table_name}' does not exist")
 
         all_column_names = [col['name'].lower() for col in table_schema.columns]
 
@@ -402,7 +402,7 @@ class QueryExecutor:
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:
-            raise TableNotFoundError(node.table_name)
+            raise ValueError(f"Table '{node.table_name}' does not exist")
 
         all_column_names = [col['name'].lower() for col in table_schema.columns]
 

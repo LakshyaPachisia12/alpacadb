@@ -8,6 +8,7 @@ Phase 1: Simple equality predicate optimization with index selection.
 from typing import Optional, Any
 from dataclasses import dataclass
 from ..query.ast_nodes import SelectNode, BinaryOp, ColumnRef, Literal
+from .cost_estimator import cost_seq_scan, cost_index_scan
 from ..errors import OptimizerError, TableNotFoundError
 
 
@@ -82,59 +83,70 @@ class QueryOptimizer:
         table_name = select_node.table_name
         where_clause = select_node.where_clause
         
-        # Always create a SeqScan plan as fallback
-        seqscan_plan = QueryPlan(
+        # Rule 1: If no WHERE clause or no index_manager, use SeqScan
+        if not where_clause or not self.index_manager:
+            return QueryPlan(
+                plan_type='SeqScan',
+                table_name=table_name,
+                full_predicate=where_clause
+            )
+        
+        # Rule 2: Try to find a simple equality predicate on an indexed column
+        index_opportunity = self._find_index_opportunity(table_name, where_clause)
+        
+        if index_opportunity:
+            # Found a potential index. Use cost model (Phase 2) to decide.
+            index_name, column_name, search_key = index_opportunity
+
+            # Gather stats
+            table_stats = self.catalog.get_table_stats(table_name) if hasattr(self.catalog, 'get_table_stats') else None
+            index_stats = self.catalog.get_index_stats(index_name) if hasattr(self.catalog, 'get_index_stats') else None
+
+            # If stats are very incomplete (no rows recorded), prefer index (rule-based fallback)
+            if not table_stats or table_stats.get('num_rows', 0) == 0:
+                use_index = True
+            else:
+                try:
+                    seq_cost = cost_seq_scan(table_stats)
+                    idx_cost = cost_index_scan(table_stats, index_stats, predicate_type='eq')
+                    
+                    # Hybrid decision: prefer index if selectivity is high (unique/near-unique)
+                    # even if costs are close, since indexes exist for a reason
+                    num_rows = table_stats.get('num_rows', 0)
+                    num_distinct = index_stats.get('num_distinct') if index_stats else None
+                    
+                    if num_distinct and num_rows > 0:
+                        selectivity = 1.0 / num_distinct
+                        # If highly selective (< 50% of rows), strongly prefer index
+                        # This balances cost-based optimization with practical index usage
+                        if selectivity < 0.5:
+                            use_index = True
+                        else:
+                            use_index = idx_cost <= seq_cost
+                    else:
+                        # No selectivity info - use pure cost comparison
+                        use_index = idx_cost <= seq_cost
+                except Exception:
+                    # Fallback to rule-based decision if cost estimation fails
+                    use_index = True
+
+            if use_index:
+                return QueryPlan(
+                    plan_type='IndexScan',
+                    table_name=table_name,
+                    index_name=index_name,
+                    index_column=column_name,
+                    search_key=search_key,
+                    full_predicate=where_clause  # Keep full predicate for additional filters
+                )
+            # Otherwise, prefer SeqScan
+        
+        # Rule 3: No usable index, fall back to SeqScan
+        return QueryPlan(
             plan_type='SeqScan',
             table_name=table_name,
             full_predicate=where_clause
         )
-        
-        # If no WHERE clause or no index_manager, must use SeqScan
-        if not where_clause or not self.index_manager:
-            return seqscan_plan
-        
-        # Try to find a simple equality predicate on an indexed column
-        index_opportunity = self._find_index_opportunity(table_name, where_clause)
-        
-        if index_opportunity:
-            # Found an index we can use - create IndexScan plan
-            index_name, column_name, search_key = index_opportunity
-            indexscan_plan = QueryPlan(
-                plan_type='IndexScan',
-                table_name=table_name,
-                index_name=index_name,
-                index_column=column_name,
-                search_key=search_key,
-                full_predicate=where_clause
-            )
-            
-            # COST-BASED DECISION: Compare costs and pick cheaper plan
-            seqscan_cost = self.estimate_cost(seqscan_plan)
-            indexscan_cost = self.estimate_cost(indexscan_plan)
-            
-            # Choose the plan with lower cost
-            if indexscan_cost < seqscan_cost:
-                return indexscan_plan
-            else:
-                return seqscan_plan
-        
-        # No usable index, use SeqScan
-        return seqscan_plan
-                full_predicate=where_clause  # Still keep full predicate for additional filters
-            )
-            
-            # COST-BASED DECISION: Compare costs and pick cheaper plan
-            seqscan_cost = self.estimate_cost(seqscan_plan)
-            indexscan_cost = self.estimate_cost(indexscan_plan)
-            
-            # Choose the plan with lower cost
-            if indexscan_cost < seqscan_cost:
-                return indexscan_plan
-            else:
-                return seqscan_plan
-        
-        # No usable index, use SeqScan
-        return seqscan_plan
     
     def _find_index_opportunity(self, table_name: str, predicate: BinaryOp) -> Optional[tuple]:
         """

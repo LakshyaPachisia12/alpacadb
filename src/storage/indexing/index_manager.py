@@ -68,11 +68,14 @@ class IndexManager:
             raise ValueError(f"Column '{column_name}' not found in table '{table_name}'")
         
         # Scan table and build index
+        # Also compute basic per-index stats: num_distinct, null_count, min_value, max_value
+        distinct_values = set()
+        null_count = 0
+        min_value = None
+        max_value = None
         current_page_id = table_schema.first_page_id
         while current_page_id is not None:
             page = self.page_manager.read_page(current_page_id)
-            if page is None:
-                break
             
             # Use TableManager to deserialize rows
             from ..table_manager import TableManager
@@ -82,6 +85,15 @@ class IndexManager:
                 try:
                     row = tm._deserialize_row(table_schema, record_bytes)
                     key = row[col_index]
+                    # Stats collection
+                    if key is None:
+                        null_count += 1
+                    else:
+                        distinct_values.add(key)
+                        if min_value is None or key < min_value:
+                            min_value = key
+                        if max_value is None or key > max_value:
+                            max_value = key
                     btree.insert(key, (current_page_id, row_id))
                 except Exception as e:
                     print(f"⚠️  Warning: Failed to index row: {e}")
@@ -95,7 +107,13 @@ class IndexManager:
             table_name=table_name,
             column_name=column_name,
             index_type=index_type,
-            root_page_id=btree.root_page_id
+            root_page_id=btree.root_page_id,
+            stats={
+                'num_distinct': len(distinct_values),
+                'null_count': null_count,
+                'min_value': min_value,
+                'max_value': max_value,
+            }
         )
         self.catalog.indexes[index_name] = index_info
         self.catalog._save_catalog()
@@ -232,10 +250,7 @@ class IndexManager:
                 self._free_btree_pages(child_id)
         
         # Free this page
-        # Note: PageManager doesn't have free_page method yet
-        # Pages will be reclaimed on database compaction
-        # TODO: Implement page deallocation in PageManager
-        pass
+        self.page_manager.free_page(root_page_id)
     
     def rebuild_indexes_for_table(self, table_name: str) -> None:
         """
