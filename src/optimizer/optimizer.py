@@ -122,13 +122,19 @@ class QueryOptimizer:
         return seqscan_plan
                 full_predicate=where_clause  # Still keep full predicate for additional filters
             )
+            
+            # COST-BASED DECISION: Compare costs and pick cheaper plan
+            seqscan_cost = self.estimate_cost(seqscan_plan)
+            indexscan_cost = self.estimate_cost(indexscan_plan)
+            
+            # Choose the plan with lower cost
+            if indexscan_cost < seqscan_cost:
+                return indexscan_plan
+            else:
+                return seqscan_plan
         
-        # Rule 3: No usable index, fall back to SeqScan
-        return QueryPlan(
-            plan_type='SeqScan',
-            table_name=table_name,
-            full_predicate=where_clause
-        )
+        # No usable index, use SeqScan
+        return seqscan_plan
     
     def _find_index_opportunity(self, table_name: str, predicate: BinaryOp) -> Optional[tuple]:
         """

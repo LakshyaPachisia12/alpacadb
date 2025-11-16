@@ -144,21 +144,19 @@ class QueryExecutor:
         """
         # Handle EXPLAIN query
         if hasattr(node, 'is_explain') and node.is_explain:
-            return [["EXPLAIN not yet implemented for joins"]], ['Query Plan']
+            if self.optimizer:
+                plan = self.optimizer.optimize(node)
+                explanation = self.optimizer.explain(plan)
+                cost = self.optimizer.estimate_cost(plan)
+                # Return explanation as a single row with one column
+                return [[explanation + f"\n\n💰 Estimated Cost: {cost:.2f}"]], ['Query Plan']
+            else:
+                return [["Optimizer not available"]], ['Query Plan']
         
-        # Build the base operator tree (scans + joins)
-        base_operator, all_column_names = self._build_base_operator_tree(node)
-        current_operator = base_operator
-        
-        # Set last_plan for testing/debugging
-        if node.joins:
-            self.last_plan = 'Join'
-        else:
-            self.last_plan = 'SeqScan'  # Default for non-optimized queries
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:
-            raise ValueError(f"Table '{node.table_name}' does not exist")
+            raise TableNotFoundError(node.table_name)
 
         # Extract column names from schema
         all_column_names = [col['name'].lower() for col in table_schema.columns]
@@ -469,7 +467,6 @@ class QueryExecutor:
                 "Index manager is not available",
                 hint="Dropping indexes requires the index manager to be initialized. This may be a configuration issue."
             )
-            raise ValueError("Index manager not available")
         
         self.index_manager.drop_index(node.index_name, node.table_name)
         return [], None
