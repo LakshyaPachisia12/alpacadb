@@ -6,6 +6,7 @@ Demonstrates storage engine and query parser functionality.
 
 import os
 import sys
+from typing import Optional
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,14 +15,15 @@ from src.storage import PageManager, Catalog, TableManager
 from src.query import Lexer, Parser
 
 
-def demo_storage_engine():
+def demo_storage_engine(db_path: Optional[str] = None):
     """Demo original storage engine (Sprint 1)."""
     print("=" * 60)
     print("🦙 AlpacaDB Demo - Storage Engine (Sprint 1)")
     print("=" * 60)
     
     # Clean up old database
-    db_path = 'data/alpacadb_demo.db'
+    db_path = db_path or 'data/alpacadb_demo.db'
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
     if os.path.exists(db_path):
         os.remove(db_path)
     
