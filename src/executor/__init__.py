@@ -1,16 +1,25 @@
 """
-Query Executor Module for AlpacaDB
-
-This module handles the execution of parsed SQL queries.
+Query executor module for AlpacaDB.
 """
 
 from .executor import QueryExecutor
-from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator
+from .operators import (
+    PhysicalOperator,
+    ScanOperator,
+    FilterOperator,
+    ProjectOperator,
+    SortOperator,
+    IndexScanOperator,
+    IndexRangeScanOperator,
+)
 
 __all__ = [
-    "QueryExecutor",
-    "ScanOperator",
-    "FilterOperator",
-    "ProjectOperator",
-    "SortOperator",
+    'QueryExecutor',
+    'PhysicalOperator',
+    'ScanOperator',
+    'FilterOperator',
+    'ProjectOperator',
+    'SortOperator',
+    'IndexScanOperator',
+    'IndexRangeScanOperator',
 ]

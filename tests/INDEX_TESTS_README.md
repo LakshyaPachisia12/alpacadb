@@ -1,30 +1,53 @@
 # Indexing Tests
 
-This folder contains two test files for the indexing functionality:
+This folder contains comprehensive tests for the indexing functionality:
 
-## 1. test_indexing.py
-**Unit and integration tests for index functionality**
+## 1. test_indexing_complete.py
+**Comprehensive unit and integration tests for all index functionality**
 
-### What it tests:
-- ✅ CREATE INDEX parsing
+### What it tests (27 tests total):
+
+#### Section 1: SQL Parsing (5 tests)
+- ✅ CREATE INDEX parsing (basic, with/without semicolon, with USING clause)
 - ✅ DROP INDEX parsing
-- ✅ Index validation (duplicate names, non-existent tables/columns)
-- ✅ Index persistence (save/load from disk)
 - ✅ Multiple indexes on same table
-- ✅ Catalog operations
+
+#### Section 2: Catalog Operations (9 tests)
+- ✅ Index creation success/failure
+- ✅ Duplicate index rejection
+- ✅ Validation (non-existent tables/columns)
+- ✅ Index dropping
+- ✅ Listing indexes
+- ✅ Index persistence (save/load from disk)
+
+#### Section 3: Query Integration (8 tests)
+- ✅ SELECT with index (single match, multiple matches, no match)
+- ✅ Index vs full scan equivalence
+- ✅ CLI automatic index usage
+- ✅ Multiple indexes on same table
+- ✅ Index correctness after inserts
+- ✅ Fallback to scan after index drop
+
+#### Section 4: Edge Cases (5 tests)
+- ✅ Index on empty table
+- ✅ NULL value handling
+- ✅ Many duplicate keys
+- ✅ Case sensitivity
+- ✅ Index name uniqueness
 
 ### How to run:
 ```powershell
-# Run all indexing tests
-python -m pytest tests/test_indexing.py -v
+# Run all indexing tests (27 tests)
+python -m pytest tests/test_indexing_complete.py -v
 
-# Run specific test class
-python -m pytest tests/test_indexing.py::TestIndexParsing -v
-python -m pytest tests/test_indexing.py::TestIndexCatalog -v
-python -m pytest tests/test_indexing.py::TestIndexValidation -v
+# Run specific test section
+python -m pytest tests/test_indexing_complete.py::TestIndexParsing -v
+python -m pytest tests/test_indexing_complete.py::TestIndexCatalog -v
+python -m pytest tests/test_indexing_complete.py::TestQueryIndexIntegration -v
+python -m pytest tests/test_indexing_complete.py::TestIndexEdgeCases -v
 
 # Run specific test
-python -m pytest tests/test_indexing.py::TestIndexCatalog::test_create_index_success -v
+python -m pytest tests/test_indexing_complete.py::TestQueryIndexIntegration::test_select_with_index_single_match -v
 ```
 
 ---

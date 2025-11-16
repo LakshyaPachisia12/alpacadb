@@ -5,7 +5,7 @@ Converts AST nodes into physical operator trees and executes them.
 """
 
 from typing import List, Any, Optional, Tuple
-from .operators import PhysicalOperator, ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator, NestedLoopJoinOperator
+from .operators import PhysicalOperator, ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator, NestedLoopJoinOperator, IndexRangeScanOperator)
 from ..query.ast_nodes import (
     SelectNode,
     InsertNode,
@@ -177,6 +177,19 @@ class QueryExecutor:
                     table_name=node.table_name,
                     index_name=plan.index_name,
                     key=plan.search_key,
+                    column_names=all_column_names,
+                )
+            elif plan.plan_type == 'IndexRangeScan':
+                # Use IndexRangeScan for range queries (>, <, >=, <=, BETWEEN)
+                scan = IndexRangeScanOperator(
+                    table_manager=self.table_manager,
+                    index_manager=self.index_manager,
+                    table_name=node.table_name,
+                    index_name=plan.index_name,
+                    range_min=plan.range_min,
+                    range_max=plan.range_max,
+                    min_inclusive=plan.range_min_inclusive,
+                    max_inclusive=plan.range_max_inclusive,
                     column_names=all_column_names,
                 )
             else:

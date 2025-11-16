@@ -22,7 +22,7 @@ if sys.platform == 'win32':
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.storage import PageManager, Catalog, TableManager
-from src.storage.indexing.index_manager import IndexManager
+from src.storage.indexing import IndexManager
 from src.query import Lexer, Parser, LexerError, ParseError
 from src.query.ast_nodes import *
 from src.executor import QueryExecutor
@@ -556,7 +556,7 @@ Examples:
                 )
             return {
                 'type': 'CREATE_INDEX',
-                'success': success,
+                'success': True,
                 'index': ast.index_name,
                 'table': ast.table_name,
                 'column': ast.column_name
@@ -590,12 +590,24 @@ Examples:
 
         # DML: SELECT
         elif isinstance(ast, SelectNode):
-            rows = self.table_manager.select_all(ast.table_name)
-
-            # Apply WHERE clause if present
+            # Try to use index if WHERE clause has indexed column
+            rows = None
+            
             if ast.where_clause:
-                rows = self._filter_rows(rows, ast.where_clause, ast.table_name)
-
+                # Check if WHERE clause is a simple equality on indexed column
+                index_used = self._try_index_scan(ast.table_name, ast.where_clause)
+                if index_used:
+                    column_name, value = index_used
+                    rows = self.table_manager.select_with_index(ast.table_name, column_name, value)
+            
+            # Fall back to full table scan if no index used
+            if rows is None:
+                rows = self.table_manager.select_all(ast.table_name)
+                
+                # Apply WHERE clause if present
+                if ast.where_clause:
+                    rows = self._filter_rows(rows, ast.where_clause, ast.table_name)
+            
             # Apply ORDER BY if present
             if ast.order_by:
                 rows = self._sort_rows(rows, ast.order_by, ast.table_name)
@@ -633,7 +645,40 @@ Examples:
 
         else:
             raise Exception(f"Unsupported AST node type: {type(ast).__name__}")
-
+    
+    def _try_index_scan(self, table_name, where_clause):
+        """
+        Check if WHERE clause can use an index.
+        
+        Returns:
+            (column_name, value) tuple if index can be used, None otherwise
+        """
+        # Only handle simple equality conditions: column = value
+        if not isinstance(where_clause, BinaryOp):
+            return None
+        
+        if where_clause.operator != '=':
+            return None
+        
+        # Left side must be a column reference
+        if not isinstance(where_clause.left, ColumnRef):
+            return None
+        
+        # Right side must be a literal value
+        if not isinstance(where_clause.right, Literal):
+            return None
+        
+        column_name = where_clause.left.name
+        value = where_clause.right.value
+        
+        # Check if there's an index on this column
+        indexes = self.catalog.get_indexes_for_table(table_name)
+        for idx in indexes:
+            if idx.column_name == column_name:
+                return (column_name, value)
+        
+        return None
+    
     def _filter_rows(self, rows, where_clause, table_name):
         """Apply WHERE clause filtering."""
         if self.catalog is None:

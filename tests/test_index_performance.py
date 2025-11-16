@@ -14,7 +14,7 @@ import string
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.storage import PageManager, Catalog, TableManager
-from src.storage.indexing.index_manager import IndexManager
+from src.storage.indexing import IndexManager
 from src.query import Lexer, Parser
 
 
@@ -28,6 +28,7 @@ class IndexPerformanceTester:
         self.catalog = None
         self.table_manager = None
         self.index_manager = None
+        self.test_emails = []  # Store actual emails from inserted data
         
     def setup(self):
         """Set up test database."""
@@ -40,8 +41,11 @@ class IndexPerformanceTester:
         # Create new database
         self.page_manager = PageManager(self.db_path)
         self.catalog = Catalog(self.page_manager)
+        self.table_manager = TableManager(self.page_manager, self.catalog)
         self.index_manager = IndexManager(self.catalog, self.page_manager)
-        self.table_manager = TableManager(self.page_manager, self.catalog, self.index_manager)
+        
+        # Connect managers
+        self.table_manager.index_manager = self.index_manager
         
         # Create test table
         columns = [
@@ -77,18 +81,24 @@ class IndexPerformanceTester:
         """Insert large number of rows into the database."""
         print(f"\n📊 Inserting {num_rows:,} rows...")
         
-        assert self.table_manager is not None, "table_manager not initialized"
+        # Clear test emails for new dataset
+        self.test_emails = []
         
         start_time = time.time()
         
         for i in range(num_rows):
+            email = self.generate_random_email()
             values = [
                 i + 1,                              # id
                 self.generate_random_string(15),    # name
-                self.generate_random_email(),       # email
+                email,                              # email
                 random.randint(18, 80),             # age
                 random.choice(['NYC', 'LA', 'Chicago', 'Houston', 'Phoenix'])  # city
             ]
+            
+            # Store some emails for testing (every 100th email)
+            if i % 100 == 0:
+                self.test_emails.append(email)
             
             self.table_manager.insert_row('users', values)
             
@@ -101,6 +111,7 @@ class IndexPerformanceTester:
         
         print(f"\n✅ Inserted {num_rows:,} rows in {elapsed:.2f} seconds")
         print(f"   ({rows_per_sec:.2f} rows/second)")
+        print(f"   Stored {len(self.test_emails)} test emails for queries")
         
         return elapsed
     
@@ -111,7 +122,9 @@ class IndexPerformanceTester:
         assert self.index_manager is not None, "index_manager not initialized"
         
         start_time = time.time()
-        self.index_manager.create_index('idx_email', 'users', 'email')
+        # Use IndexManager to actually build the index
+        self.index_manager.create_index('idx_email', 'users', 'email', 
+                                        table_manager=self.table_manager)
         elapsed = time.time() - start_time
         
         print(f"✅ Index created in {elapsed:.2f} seconds")
@@ -172,11 +185,14 @@ class IndexPerformanceTester:
         # Get column index for 'email' (should be index 2: id=0, name=1, email=2, age=3, city=4)
         email_col_idx = 2
         
+        # Limit queries to available test emails
+        actual_queries = min(num_queries, len(self.test_emails))
+        
         start_time = time.time()
         
-        for i in range(num_queries):
-            # Simulate searching for random email
-            test_email = self.generate_random_email()
+        for i in range(actual_queries):
+            # Use actual email from database
+            test_email = self.test_emails[i % len(self.test_emails)]
             rows = self.table_manager.select_all('users')
             
             # Filter manually (simulating WHERE clause without index)
@@ -184,9 +200,9 @@ class IndexPerformanceTester:
             matches = [row for row in rows if row[email_col_idx] == test_email]
         
         elapsed = time.time() - start_time
-        avg_query_time = (elapsed / num_queries) * 1000  # in milliseconds
+        avg_query_time = (elapsed / actual_queries) * 1000  # in milliseconds
         
-        print(f"✅ {num_queries} queries completed in {elapsed:.2f} seconds")
+        print(f"✅ {actual_queries} queries completed in {elapsed:.2f} seconds")
         print(f"   Average: {avg_query_time:.2f} ms per query")
         
         return elapsed, avg_query_time
@@ -195,33 +211,26 @@ class IndexPerformanceTester:
         """Test query performance WITH index."""
         print(f"\n🔍 Testing {num_queries} queries WITH index...")
         
-        assert self.index_manager is not None, "index_manager not initialized"
+        # Create index using IndexManager
+        self.index_manager.create_index('idx_email', 'users', 'email',
+                                       table_manager=self.table_manager)
         
-        # Create index
-        self.index_manager.create_index('idx_email', 'users', 'email')
+        # Limit queries to available test emails
+        actual_queries = min(num_queries, len(self.test_emails))
         
         start_time = time.time()
         
-        for i in range(num_queries):
-            # Simulate searching for random email
-            test_email = self.generate_random_email()
+        for i in range(actual_queries):
+            # Use actual email from database
+            test_email = self.test_emails[i % len(self.test_emails)]
             
-            # ✅ USE THE INDEX instead of table scan!
-            result = self.index_manager.search_index('idx_email', test_email)
-            
-            if result:
-                # Index found the key - fetch the actual row
-                page_id, row_id = result
-                row = self.fetch_row_by_location('users', page_id, row_id)
-                matches = [row] if row else []
-            else:
-                # Not found
-                matches = []
+            # Use index-aware select
+            matches = self.table_manager.select_with_index('users', 'email', test_email)
         
         elapsed = time.time() - start_time
-        avg_query_time = (elapsed / num_queries) * 1000  # in milliseconds
+        avg_query_time = (elapsed / actual_queries) * 1000  # in milliseconds
         
-        print(f"✅ {num_queries} queries completed in {elapsed:.2f} seconds")
+        print(f"✅ {actual_queries} queries completed in {elapsed:.2f} seconds")
         print(f"   Average: {avg_query_time:.2f} ms per query")
         
         return elapsed, avg_query_time
