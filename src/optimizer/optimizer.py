@@ -125,19 +125,21 @@ class QueryOptimizer:
                         seq_cost = cost_seq_scan(table_stats)
                         idx_cost = cost_index_scan(table_stats, index_stats, predicate_type='eq')
                         
-                        # Hybrid decision: prefer index if selectivity is high (unique/near-unique)
-                        # even if costs are close, since indexes exist for a reason
+                        # Cost-based decision with selectivity awareness
                         num_rows = table_stats.get('num_rows', 0)
                         num_distinct = index_stats.get('num_distinct') if index_stats else None
                         
                         if num_distinct and num_rows > 0:
                             selectivity = 1.0 / num_distinct
-                            # If highly selective (< 50% of rows), strongly prefer index
-                            # This balances cost-based optimization with practical index usage
-                            if selectivity < 0.5:
+                            # For good selectivity (<= 30%), always prefer index
+                            # For poor selectivity (> 30%), use cost comparison
+                            if selectivity <= 0.3:
+                                # Highly selective - always use index
                                 use_index = True
                             else:
-                                use_index = idx_cost <= seq_cost
+                                # Poor selectivity - rely on cost comparison
+                                # Cost estimator already penalizes index scans heavily for poor selectivity
+                                use_index = idx_cost < seq_cost
                         else:
                             # No selectivity info - use pure cost comparison
                             use_index = idx_cost <= seq_cost

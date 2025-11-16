@@ -11,10 +11,10 @@ from typing import Any, Dict, Optional
 
 # Tunable constants - calibrated to favor indexes for selective predicates
 PAGE_IO_COST = 1.0       # Cost to read one page from disk
-CPU_TUPLE_COST = 0.001    # Cost to process one tuple/row (reduced to favor index for small tables)
+CPU_TUPLE_COST = 0.01    # Cost to process one tuple/row
 DEFAULT_SELECTIVITY_EQ = 0.1  # Fallback selectivity for equality when stats missing
 BTREE_ORDER = 4          # Default B-Tree order used in indexing
-INDEX_LOOKUP_COST = 0.5  # Base cost for index lookup (lower than page scan)
+INDEX_LOOKUP_COST = 1.2  # Base cost for index lookup - higher to account for tree traversal overhead
 
 
 def cost_seq_scan(table_stats: Optional[Dict[str, int]]) -> float:
@@ -56,10 +56,13 @@ def cost_index_scan(table_stats: Optional[Dict[str, int]],
     where expected_matches = selectivity * num_rows.
     
     Note: B-tree depth cost is reduced (0.3x) because nodes are often cached in memory.
+    For low selectivity (> 0.3), index scan is penalized as seq scan becomes more efficient.
     """
     num_rows = 0
+    seq_cost_baseline = None
     if table_stats:
         num_rows = table_stats.get('num_rows', 0) or 0
+        seq_cost_baseline = cost_seq_scan(table_stats)
 
     selectivity = DEFAULT_SELECTIVITY_EQ
     num_distinct = None
@@ -76,4 +79,17 @@ def cost_index_scan(table_stats: Optional[Dict[str, int]],
     # Base lookup cost + reduced depth cost (cached nodes) + tuple processing
     io_cost = INDEX_LOOKUP_COST + (index_depth * 0.3 * PAGE_IO_COST)
     cpu_cost = expected_matches * CPU_TUPLE_COST
-    return io_cost + cpu_cost
+    
+    base_cost = io_cost + cpu_cost
+    
+    # Heavily penalize index scan for poor selectivity (> 30% of rows)
+    # When selectivity is poor, sequential scan is much more efficient
+    if selectivity > 0.3:
+        # Exponential penalty that makes index scan very expensive for low selectivity
+        penalty_factor = 1.0 + (selectivity - 0.3) * 15.0
+        base_cost *= penalty_factor
+        # Ensure index cost is always worse than seq scan for poor selectivity
+        if seq_cost_baseline is not None:
+            base_cost = max(base_cost, seq_cost_baseline * 1.3)
+    
+    return base_cost
