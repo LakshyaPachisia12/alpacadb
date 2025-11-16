@@ -43,8 +43,4 @@ Thumbs.db
 .coverage
 htmlcov/
 
-# Project specs
 specs/
-
-# Virtual environments
-v_alpaca/
