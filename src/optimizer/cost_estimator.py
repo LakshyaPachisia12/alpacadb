@@ -54,7 +54,7 @@ def cost_index_scan(table_stats: Optional[Dict[str, int]],
     For equality:
       cost ≈ INDEX_LOOKUP_COST + index_depth * 0.3 * PAGE_IO_COST + expected_matches * CPU_TUPLE_COST
     where expected_matches = selectivity * num_rows.
-    
+
     Note: B-tree depth cost is reduced (0.3x) because nodes are often cached in memory.
     For low selectivity (> 0.3), index scan is penalized as seq scan becomes more efficient.
     """
@@ -79,9 +79,9 @@ def cost_index_scan(table_stats: Optional[Dict[str, int]],
     # Base lookup cost + reduced depth cost (cached nodes) + tuple processing
     io_cost = INDEX_LOOKUP_COST + (index_depth * 0.3 * PAGE_IO_COST)
     cpu_cost = expected_matches * CPU_TUPLE_COST
-    
+
     base_cost = io_cost + cpu_cost
-    
+
     # Heavily penalize index scan for poor selectivity (> 30% of rows)
     # When selectivity is poor, sequential scan is much more efficient
     if selectivity > 0.3:
@@ -91,5 +91,5 @@ def cost_index_scan(table_stats: Optional[Dict[str, int]],
         # Ensure index cost is always worse than seq scan for poor selectivity
         if seq_cost_baseline is not None:
             base_cost = max(base_cost, seq_cost_baseline * 1.3)
-    
+
     return base_cost

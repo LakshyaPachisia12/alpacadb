@@ -10,14 +10,14 @@ from typing import Optional, Any
 class AlpacaDBError(Exception):
     """
     Base exception class for all AlpacaDB errors.
-    
+
     Provides structured error messages with:
     - Error type
     - Descriptive message
     - Optional hints
     - Optional token/context
     """
-    
+
     def __init__(
         self,
         message: str,
@@ -28,7 +28,7 @@ class AlpacaDBError(Exception):
     ):
         """
         Initialize an AlpacaDB error.
-        
+
         Args:
             message: Main error message
             hint: Optional helpful hint for the user
@@ -42,24 +42,24 @@ class AlpacaDBError(Exception):
         self.error_type = error_type or self.__class__.__name__
         self.context = context
         super().__init__(self.message)
-    
+
     def __str__(self) -> str:
         """Format error message for display."""
         lines = []
         lines.append(f"❌ ERROR [{self.error_type}]: {self.message}")
-        
+
         if self.token is not None:
             token_str = str(self.token) if not isinstance(self.token, str) else f'"{self.token}"'
             lines.append(f"📍 At: {token_str}")
-        
+
         if self.context:
             lines.append(f"📋 Context: {self.context}")
-        
+
         if self.hint:
             lines.append(f"💡 HINT: {self.hint}")
-        
+
         return "\n".join(lines)
-    
+
     def __repr__(self) -> str:
         """String representation for debugging."""
         return f"{self.__class__.__name__}({self.message!r}, hint={self.hint!r})"
@@ -67,32 +67,38 @@ class AlpacaDBError(Exception):
 
 # ==================== Parser Errors ====================
 
-class SyntaxError(AlpacaDBError):
+class AlpacaSyntaxError(AlpacaDBError):
     """Syntax error in SQL query."""
-    
-    def __init__(self, message: str, token: Optional[Any] = None, hint: Optional[str] = None, context: Optional[str] = None):
-        super().__init__(message, hint=hint, token=token, error_type="SyntaxError", context=context)
+
+    def __init__(self, message: str, token: Optional[Any] = None,
+                 hint: Optional[str] = None, context: Optional[str] = None):
+        super().__init__(message, hint=hint, token=token, error_type="SyntaxError",
+                         context=context)
 
 
 class ParserError(AlpacaDBError):
     """Error during query parsing."""
-    
-    def __init__(self, message: str, token: Optional[Any] = None, hint: Optional[str] = None, context: Optional[str] = None):
-        super().__init__(message, hint=hint, token=token, error_type="ParserError", context=context)
+
+    def __init__(self, message: str, token: Optional[Any] = None,
+                 hint: Optional[str] = None, context: Optional[str] = None):
+        super().__init__(message, hint=hint, token=token, error_type="ParserError",
+                         context=context)
 
 
 class LexerError(AlpacaDBError):
     """Error during lexical analysis (tokenization)."""
-    
-    def __init__(self, message: str, token: Optional[Any] = None, hint: Optional[str] = None, context: Optional[str] = None):
-        super().__init__(message, hint=hint, token=token, error_type="LexerError", context=context)
+
+    def __init__(self, message: str, token: Optional[Any] = None,
+                 hint: Optional[str] = None, context: Optional[str] = None):
+        super().__init__(message, hint=hint, token=token, error_type="LexerError",
+                         context=context)
 
 
 # ==================== Optimizer Errors ====================
 
 class OptimizerError(AlpacaDBError):
     """Error during query optimization."""
-    
+
     def __init__(self, message: str, hint: Optional[str] = None, context: Optional[str] = None):
         super().__init__(message, hint=hint, error_type="OptimizerError", context=context)
 
@@ -101,7 +107,7 @@ class OptimizerError(AlpacaDBError):
 
 class ExecutionError(AlpacaDBError):
     """Error during query execution."""
-    
+
     def __init__(self, message: str, hint: Optional[str] = None, context: Optional[str] = None):
         super().__init__(message, hint=hint, error_type="ExecutionError", context=context)
 
@@ -127,43 +133,46 @@ def _normalize_identifier(identifier: Optional[Any]) -> str:
 
 class TableNotFoundError(AlpacaDBError):
     """Table does not exist."""
-    
+
     def __init__(self, table_name: str, hint: Optional[str] = None):
         normalized_name = _normalize_identifier(table_name)
         message = f'Table "{normalized_name}" does not exist.'
         if not hint:
-            hint = f'Use \\tables to view all available tables.'
+            hint = 'Use \\tables to view all available tables.'
         super().__init__(message, hint=hint, token=normalized_name, error_type="TableNotFoundError")
 
 
 class ColumnNotFoundError(AlpacaDBError):
-    """Column does not exist."""
-    
-    def __init__(self, column_name: str, table_name: Optional[str] = None, hint: Optional[str] = None):
+    """Column does not exist in table."""
+
+    def __init__(self, column_name: str, table_name: Optional[str] = None,
+                 hint: Optional[str] = None):
         if table_name:
-            message = f'Column "{column_name}" does not exist in table "{table_name}".'
+            message = f'Column "{column_name}" not found in table "{table_name}".'
         else:
-            message = f'Column "{column_name}" does not exist.'
-        
+            message = f'Column "{column_name}" not found.'
+
         if not hint:
             if table_name:
                 hint = f'Use \\schema {table_name} to view the table structure.'
             else:
                 hint = 'Use \\schema <table> to view table structure.'
-        
-        super().__init__(message, hint=hint, token=column_name, error_type="ColumnNotFoundError")
+
+        super().__init__(message, hint=hint, token=column_name,
+                         error_type="ColumnNotFoundError")
 
 
-class IndexError(AlpacaDBError):
+class AlpacaIndexError(AlpacaDBError):
     """Error related to indexes."""
-    
-    def __init__(self, message: str, index_name: Optional[str] = None, hint: Optional[str] = None):
+
+    def __init__(self, message: str, index_name: Optional[str] = None,
+                 hint: Optional[str] = None):
         super().__init__(message, hint=hint, token=index_name, error_type="IndexError")
 
 
-class IndexNotFoundError(IndexError):
+class IndexNotFoundError(AlpacaIndexError):
     """Index does not exist."""
-    
+
     def __init__(self, index_name: str, hint: Optional[str] = None):
         message = f'Index "{index_name}" does not exist.'
         if not hint:
@@ -173,17 +182,21 @@ class IndexNotFoundError(IndexError):
 
 class DuplicateTableError(AlpacaDBError):
     """Table already exists."""
-    
+
     def __init__(self, table_name: str, hint: Optional[str] = None):
         message = f'Table "{table_name}" already exists.'
         if not hint:
-            hint = f'Use DROP TABLE {table_name} to remove it first, or choose a different name.'
-        super().__init__(message, hint=hint, token=table_name, error_type="DuplicateTableError")
+            hint = (
+                f'Use DROP TABLE {table_name} to remove it first, '
+                'or choose a different name.'
+            )
+        super().__init__(message, hint=hint, token=table_name,
+                         error_type="DuplicateTableError")
 
 
 class DuplicateIndexError(IndexError):
     """Index already exists."""
-    
+
     def __init__(self, index_name: str, hint: Optional[str] = None):
         message = f'Index "{index_name}" already exists.'
         if not hint:
@@ -193,14 +206,14 @@ class DuplicateIndexError(IndexError):
 
 class InvalidSchemaError(AlpacaDBError):
     """Invalid table or column schema."""
-    
+
     def __init__(self, message: str, hint: Optional[str] = None):
         super().__init__(message, hint=hint, error_type="InvalidSchemaError")
 
 
 class TypeMismatchError(AlpacaDBError):
     """Type mismatch in operation."""
-    
+
     def __init__(self, message: str, expected_type: Optional[str] = None, actual_type: Optional[str] = None, hint: Optional[str] = None):
         if expected_type and actual_type:
             message = f"{message} (Expected: {expected_type}, Got: {actual_type})"
@@ -209,24 +222,24 @@ class TypeMismatchError(AlpacaDBError):
 
 class DivisionByZeroError(ExecutionError):
     """Division by zero error."""
-    
+
     def __init__(self, hint: Optional[str] = None):
         message = "Division by zero is not allowed."
         if not hint:
             hint = "Check your WHERE clause or use NULLIF to handle zero values."
-        super().__init__(message, hint=hint, error_type="DivisionByZeroError")
+        super().__init__(message, hint=hint)
 
 
 class StorageError(AlpacaDBError):
     """Error related to storage operations."""
-    
+
     def __init__(self, message: str, hint: Optional[str] = None, context: Optional[str] = None):
         super().__init__(message, hint=hint, error_type="StorageError", context=context)
 
 
 class CorruptedPageError(StorageError):
     """Page is corrupted."""
-    
+
     def __init__(self, page_id: int, hint: Optional[str] = None):
         message = f"Page {page_id} is corrupted and cannot be read."
         if not hint:
@@ -238,9 +251,8 @@ class CorruptedPageError(StorageError):
 
 class InternalError(AlpacaDBError):
     """Internal error (should not happen in normal operation)."""
-    
+
     def __init__(self, message: str, hint: Optional[str] = None):
         if not hint:
             hint = "This is an internal error. Please report this issue."
         super().__init__(message, hint=hint, error_type="InternalError")
-

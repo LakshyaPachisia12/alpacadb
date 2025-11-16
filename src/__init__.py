@@ -11,13 +11,13 @@ __author__ = "AlpacaDB Team"
 # Export error classes
 from .errors import (
     AlpacaDBError,
-    SyntaxError,
+    AlpacaSyntaxError,
     ParserError,
     LexerError,
     OptimizerError,
     ExecutionError,
     TableNotFoundError,
     ColumnNotFoundError,
-    IndexError,
+    AlpacaIndexError,
     IndexNotFoundError,
 )

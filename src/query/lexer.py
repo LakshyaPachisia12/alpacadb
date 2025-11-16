@@ -12,15 +12,15 @@ from ..errors import LexerError
 class Lexer:
     """
     Lexical analyzer for AlpacaDB queries.
-    
+
     Converts text like "SELECT * FROM users" into tokens:
     [SELECT, STAR, FROM, IDENTIFIER(users)]
     """
-    
+
     def __init__(self, source: str):
         """
         Initialize lexer with source code.
-        
+
         Args:
             source: SQL query string
         """
@@ -30,47 +30,47 @@ class Lexer:
         self.current = 0    # Current character position
         self.line = 1       # Current line number
         self.column = 1     # Current column number
-    
+
     def tokenize(self) -> List[Token]:
         """
         Tokenize the entire source code.
-        
+
         Returns:
             List of tokens (including EOF token at end)
-            
+
         Raises:
             LexerError: If invalid syntax encountered
         """
         while not self._is_at_end():
             self.start = self.current
             self._scan_token()
-        
+
         # Add EOF token
         self.tokens.append(Token(TokenType.EOF, '', line=self.line, column=self.column))
         return self.tokens
-    
+
     def _scan_token(self):
         """Scan and classify next token."""
         char = self._advance()
-        
+
         # Skip whitespace
         if char in ' \t\r':
             self.column += 1
             return
-        
+
         # Newline
         if char == '\n':
             self.line += 1
             self.column = 1
             return
-        
+
         # Comments
         if char == '-' and self._peek() == '-':
             # Single-line comment: -- comment
             while self._peek() != '\n' and not self._is_at_end():
                 self._advance()
             return
-        
+
         if char == '/' and self._peek() == '*':
             # Multi-line comment: /* comment */
             self._advance()  # consume *
@@ -84,7 +84,7 @@ class Lexer:
                     self.column = 1
                 self._advance()
             return
-        
+
         # Single-character tokens
         if char == '*':
             self._add_token(TokenType.STAR)
@@ -96,7 +96,7 @@ class Lexer:
             self._add_token(TokenType.LEFT_PAREN)
         elif char == ')':
             self._add_token(TokenType.RIGHT_PAREN)
-        
+
         # Operators
         elif char == '=':
             self._add_token(TokenType.EQUALS)
@@ -120,19 +120,19 @@ class Lexer:
                 self._add_token(TokenType.GREATER_EQUAL)
             else:
                 self._add_token(TokenType.GREATER_THAN)
-        
+
         # String literals
         elif char in ('"', "'"):
             self._string_literal(char)
-        
+
         # Number literals
         elif char.isdigit() or (char == '-' and self._peek().isdigit()):
             self._number_literal()
-        
+
         # Identifiers and keywords
         elif char.isalpha() or char == '_':
             self._identifier()
-        
+
         else:
             raise LexerError(
                 f"Unexpected character '{char}' at line {self.line}, column {self.column}",
@@ -140,11 +140,11 @@ class Lexer:
                 token=char,
                 context=f"Line {self.line}, Column {self.column}"
             )
-    
+
     def _string_literal(self, quote_char: str):
         """Parse string literal enclosed in quotes."""
         value = ""
-        
+
         while self._peek() != quote_char and not self._is_at_end():
             if self._peek() == '\n':
                 self.line += 1
@@ -164,7 +164,7 @@ class Lexer:
                     value += next_char
             else:
                 value += self._advance()
-        
+
         if self._is_at_end():
             raise LexerError(
                 f"Unterminated string literal starting at line {self.line}",
@@ -172,40 +172,40 @@ class Lexer:
                 token=quote_char,
                 context=f"Line {self.line}"
             )
-        
+
         # Consume closing quote
         self._advance()
-        
+
         lexeme = self.source[self.start:self.current]
         self._add_token(TokenType.STRING_LITERAL, value)
-    
+
     def _number_literal(self):
         """Parse integer literal."""
         while self._peek().isdigit():
             self._advance()
-        
+
         lexeme = self.source[self.start:self.current]
         value = int(lexeme)
         self._add_token(TokenType.INTEGER_LITERAL, value)
-    
+
     def _identifier(self):
         """Parse identifier or keyword (including qualified names like table.column)."""
         while self._peek().isalnum() or self._peek() in ('_', '.'):
             self._advance()
-        
+
         lexeme = self.source[self.start:self.current]
         lexeme_upper = lexeme.upper()
-        
+
         # Check if keyword
         token_type = KEYWORDS.get(lexeme_upper, TokenType.IDENTIFIER)
-        
+
         # Special handling for boolean literals
         if token_type == TokenType.BOOLEAN_LITERAL:
             value = (lexeme_upper == 'TRUE')
             self._add_token(token_type, value)
         else:
             self._add_token(token_type, lexeme)
-    
+
     def _match(self, expected: str) -> bool:
         """Match and consume next character if it equals expected."""
         if self._is_at_end():
@@ -215,30 +215,30 @@ class Lexer:
         self.current += 1
         self.column += 1
         return True
-    
+
     def _advance(self) -> str:
         """Consume and return current character."""
         char = self.source[self.current]
         self.current += 1
         self.column += 1
         return char
-    
+
     def _peek(self) -> str:
         """Return current character without consuming."""
         if self._is_at_end():
             return '\0'
         return self.source[self.current]
-    
+
     def _peek_next(self) -> str:
         """Return next character without consuming."""
         if self.current + 1 >= len(self.source):
             return '\0'
         return self.source[self.current + 1]
-    
+
     def _is_at_end(self) -> bool:
         """Check if at end of source."""
         return self.current >= len(self.source)
-    
+
     def _add_token(self, token_type: TokenType, value=None):
         """Add token to list."""
         lexeme = self.source[self.start:self.current]

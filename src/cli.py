@@ -10,9 +10,19 @@ import time
 import csv
 from typing import Optional
 
+from src.storage import PageManager, Catalog, TableManager
+from src.storage.indexing import IndexManager
+from src.query import Lexer, Parser, LexerError, ParseError
+from src.query.ast_nodes import (
+    SelectNode, InsertNode, UpdateNode, DeleteNode,
+    CreateTableNode, DropTableNode, CreateIndexNode, DropIndexNode,
+    BinaryOp, ColumnRef, Literal, ASTNode, TransactionNode
+)
+from src.executor import QueryExecutor
+from src.errors import AlpacaDBError
+
 # Fix Unicode encoding on Windows
 if sys.platform == 'win32':
-    import io
     # Set stdout/stderr to UTF-8
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
@@ -20,13 +30,6 @@ if sys.platform == 'win32':
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from src.storage import PageManager, Catalog, TableManager
-from src.storage.indexing import IndexManager
-from src.query import Lexer, Parser, LexerError, ParseError
-from src.query.ast_nodes import *
-from src.executor import QueryExecutor
-from src.errors import AlpacaDBError, InternalError
 
 
 class AlpacaDBCLI:
@@ -230,14 +233,14 @@ class AlpacaDBCLI:
         print("┌" + "─" * 70 + "┐")
         print(f"│ {'Column':<25} {'Type':<15} {'Nullable':<10} {'Primary Key':<17} │")
         print("├" + "─" * 70 + "┤")
-        
+
         for col in schema.columns:
             col_name = col['name']
             col_type = col['type']
             nullable = "Yes" if col.get('nullable', True) else "No"
             primary_key = "Yes" if 'PRIMARY KEY' in col_type.upper() else "No"
             print(f"│ {col_name:<25} {col_type:<15} {nullable:<10} {primary_key:<17} │")
-        
+
         print("└" + "─" * 70 + "┘")
         print()
 
@@ -256,13 +259,13 @@ class AlpacaDBCLI:
         print("┌" + "─" * 80 + "┐")
         print(f"│ {'Index Name':<25} {'Table':<20} {'Column':<20} {'Type':<12} │")
         print("├" + "─" * 80 + "┤")
-        
+
         for index_name in indexes:
             idx_info = self.catalog.get_index(index_name)
             if idx_info:
                 print(f"│ {idx_info.index_name:<25} {idx_info.table_name:<20} "
                       f"{idx_info.column_name:<20} {idx_info.index_type:<12} │")
-        
+
         print("└" + "─" * 80 + "┘")
         print()
 
@@ -275,10 +278,10 @@ class AlpacaDBCLI:
         num_pages = self.page_manager.get_num_pages()
         db_size = num_pages * 4096  # 4KB per page
         db_size_mb = db_size / (1024 * 1024)
-        
+
         num_tables = len(self.catalog.list_tables())
         num_indexes = len(self.catalog.list_indexes())
-        
+
         # Count total rows
         total_rows = 0
         for table_name in self.catalog.list_tables():
@@ -369,22 +372,22 @@ Examples:
 
             # Get query plan
             plan = self.executor.optimizer.optimize(ast)
-            
+
             # Generate explanation
             explanation = self.executor.optimizer.explain(plan)
-            
+
             print("\n🔍 Query Execution Plan:")
             print("┌" + "─" * 70 + "┐")
             for line in explanation.split('\n'):
                 if line.strip():
                     print(f"│ {line:<68} │")
             print("└" + "─" * 70 + "┘")
-            
+
             # Estimate costs if cost-based optimizer is available
             if hasattr(self.executor.optimizer, 'estimate_cost'):
                 cost = self.executor.optimizer.estimate_cost(plan)
                 print(f"\n💰 Estimated Cost: {cost:.2f}")
-            
+
             print()
 
         except AlpacaDBError as e:
@@ -392,8 +395,8 @@ Examples:
             print(str(e))
         except Exception as e:
             # Internal errors - show a user-friendly message
-            print(f"❌ ERROR [Internal]: An unexpected error occurred")
-            print(f"💡 HINT: This may be a bug. Please report this issue.")
+            print("❌ ERROR [Internal]: An unexpected error occurred")
+            print("💡 HINT: This may be a bug. Please report this issue.")
             print(f"📋 Details: {str(e)}")
 
     def _export_table(self, table_name: str, file_path: str):
@@ -432,7 +435,7 @@ Examples:
             schema = self.catalog.get_table_schema(table_name)
             if not schema:
                 print(f"❌ Table '{table_name}' does not exist")
-                print(f"   Create the table first using CREATE TABLE")
+                print("   Create the table first using CREATE TABLE")
                 return
 
             # Check if file exists
@@ -495,11 +498,11 @@ Examples:
             if self._should_use_executor(ast):
                 # Use new executor path
                 result = self._execute_with_executor(ast)
-                print(f"(Executed using new executor)")
+                print("(Executed using new executor)")
             else:
                 # Use legacy path
                 result = self._execute_ast(ast)
-                print(f"(Executed using legacy path)")
+                print("(Executed using legacy path)")
             # Display result
             elapsed = (time.time() - start_time) * 1000  # milliseconds
             self._display_result(result, elapsed)
@@ -508,14 +511,13 @@ Examples:
             print(f"❌ Lexer Error: {e}")
         except ParseError as e:
             print(f"❌ Syntax Error: {e}")
-        except Exception as e:
-            print(f"❌ ERROR [Internal]: An unexpected error occurred")
-            print(f"💡 HINT: This may be a bug. Please report this issue.")
-            print(f"📋 Details: {str(e)}")
-
         except AlpacaDBError as e:
             # All AlpacaDB errors already have nice formatting
             print(str(e))
+        except Exception as e:
+            print("❌ ERROR [Internal]: An unexpected error occurred")
+            print("💡 HINT: This may be a bug. Please report this issue.")
+            print(f"📋 Details: {str(e)}")
 
     def _execute_ast(self, ast: ASTNode):
         """Execute parsed AST node."""
@@ -562,7 +564,7 @@ Examples:
                 'table': ast.table_name,
                 'column': ast.column_name
             }
-        
+
         # DDL: DROP INDEX
         elif isinstance(ast, DropIndexNode):
             if self.index_manager:
@@ -593,22 +595,22 @@ Examples:
         elif isinstance(ast, SelectNode):
             # Try to use index if WHERE clause has indexed column
             rows = None
-            
+
             if ast.where_clause:
                 # Check if WHERE clause is a simple equality on indexed column
                 index_used = self._try_index_scan(ast.table_name, ast.where_clause)
                 if index_used:
                     column_name, value = index_used
                     rows = self.table_manager.select_with_index(ast.table_name, column_name, value)
-            
+
             # Fall back to full table scan if no index used
             if rows is None:
                 rows = self.table_manager.select_all(ast.table_name)
-                
+
                 # Apply WHERE clause if present
                 if ast.where_clause:
                     rows = self._filter_rows(rows, ast.where_clause, ast.table_name)
-            
+
             # Apply ORDER BY if present
             if ast.order_by:
                 rows = self._sort_rows(rows, ast.order_by, ast.table_name)
@@ -646,40 +648,40 @@ Examples:
 
         else:
             raise Exception(f"Unsupported AST node type: {type(ast).__name__}")
-    
+
     def _try_index_scan(self, table_name, where_clause):
         """
         Check if WHERE clause can use an index.
-        
+
         Returns:
             (column_name, value) tuple if index can be used, None otherwise
         """
         # Only handle simple equality conditions: column = value
         if not isinstance(where_clause, BinaryOp):
             return None
-        
+
         if where_clause.operator != '=':
             return None
-        
+
         # Left side must be a column reference
         if not isinstance(where_clause.left, ColumnRef):
             return None
-        
+
         # Right side must be a literal value
         if not isinstance(where_clause.right, Literal):
             return None
-        
+
         column_name = where_clause.left.name
         value = where_clause.right.value
-        
+
         # Check if there's an index on this column
         indexes = self.catalog.get_indexes_for_table(table_name)
         for idx in indexes:
             if idx.column_name == column_name:
                 return (column_name, value)
-        
+
         return None
-    
+
     def _filter_rows(self, rows, where_clause, table_name):
         """Apply WHERE clause filtering."""
         if self.catalog is None:
@@ -783,14 +785,14 @@ Examples:
                 print(f"✅ Index '{result['index']}' created on {result['table']}.{result['column']}")
             else:
                 print(f"❌ Failed to create index '{result['index']}'")
-        
+
         # DROP INDEX
         elif result_type == 'DROP_INDEX':
             if result['success']:
                 print(f"✅ Index '{result['index']}' dropped")
             else:
                 print(f"❌ Failed to drop index '{result['index']}'")
-        
+
         # INSERT
         elif result_type == "INSERT":
             if result["success"]:
@@ -827,18 +829,18 @@ Examples:
                 plan_info = ""
                 if self.executor and self.executor.last_plan:
                     plan_info = f" [Plan: {self.executor.last_plan}]"
-                
+
                 print(f"\n{len(rows)} row(s) retrieved in {elapsed_ms:.3f}ms{plan_info}")
 
         # UPDATE
         elif result_type == "UPDATE":
-            print(f"✅ UPDATE executed")
+            print("✅ UPDATE executed")
             if "note" in result:
                 print(f"   Note: {result['note']}")
 
         # DELETE
         elif result_type == "DELETE":
-            print(f"✅ DELETE executed")
+            print("✅ DELETE executed")
             if "note" in result:
                 print(f"   Note: {result['note']}")
 
@@ -893,12 +895,12 @@ Examples:
             UpdateNode,
             DeleteNode,
         ))
-    
+
     def _execute_with_executor(self, ast: ASTNode):
         """Execute AST using the new QueryExecutor."""
         try:
             rows, columns = self.executor.execute(ast)
-            
+
             # Convert executor output to CLI result format
             if isinstance(ast, SelectNode):
                 return {
@@ -934,7 +936,7 @@ Examples:
                 }
             else:
                 raise ValueError(f"Unsupported AST type: {type(ast).__name__}")
-            
+
         except Exception as e:
             raise Exception(f"Executor error: {e}")
 
@@ -979,4 +981,3 @@ Once inside AlpacaDB:
 
 if __name__ == "__main__":
     main()
-

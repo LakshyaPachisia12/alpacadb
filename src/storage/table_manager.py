@@ -41,7 +41,7 @@ class TableManager:
         self.page_manager = page_manager
         self.catalog = catalog
         self.index_manager = index_manager  # Store the index_manager if provided
-    
+
     def insert_row(self, table_name: str, values: List[Any]) -> bool:
         """
         Insert a single row into a table.
@@ -98,14 +98,14 @@ class TableManager:
 
         # Step 6: Write page to disk
         self.page_manager.write_page(page)
-        
+
         # Step 7: Update indexes
         if self.index_manager:
             # Build column_values dict for index maintenance
             column_values = {}
             for idx, col in enumerate(schema.columns):
                 column_values[col['name']] = values[idx]
-            
+
             # Determine the actual row_id in the page
             row_id = len(page.records) - 1
             self.index_manager.insert_entry(table_name, column_values, page.page_id, row_id)
@@ -115,7 +115,7 @@ class TableManager:
         if schema.num_rows <= 10 or schema.num_rows % 50 == 0:
             # Persist early for small tables and occasionally for larger ones
             self.catalog._save_catalog()
-        
+
         print(f"✅ Inserted row into '{table_name}': {values}")
         return True
 
@@ -163,17 +163,17 @@ class TableManager:
 
         print(f"📊 Retrieved {len(rows)} row(s) from '{table_name}'")
         return rows
-    
+
     def select_with_index(self, table_name: str, column_name: str, value: Any) -> List[List[Any]]:
         """
         Select rows using an index (optimized lookup).
         Returns ALL rows matching the value, not just the first one.
-        
+
         Args:
             table_name: Name of the table
             column_name: Name of the indexed column to search
             value: Value to search for
-            
+
         Returns:
             List of matching rows
         """
@@ -182,7 +182,7 @@ class TableManager:
         if not schema:
             print(f"❌ Table '{table_name}' does not exist")
             return []
-        
+
         # Step 2: Find an index on this column
         indexes = self.catalog.get_indexes_for_table(table_name)
         target_index = None
@@ -190,80 +190,80 @@ class TableManager:
             if idx.column_name == column_name:
                 target_index = idx
                 break
-        
+
         if not target_index:
             # No index available - fall back to full scan
             print(f"⚠️  No index on {table_name}({column_name}), using full table scan")
             return self._filter_rows(self.select_all(table_name), column_name, value, schema)
-        
+
         # Step 3: Use IndexManager to search for ALL matches
         if not self.index_manager:
-            print(f"⚠️  IndexManager not available, using full table scan")
+            print("⚠️  IndexManager not available, using full table scan")
             return self._filter_rows(self.select_all(table_name), column_name, value, schema)
-        
+
         # FIXED: Use search_index_all to get ALL matching rows
         results = self.index_manager.search_index_all(target_index.index_name, value)
-        
+
         if not results:
             print(f"📭 No rows found with {column_name}='{value}'")
             return []
-        
+
         # Step 4: Retrieve ALL matching rows
         rows = []
         for page_id, row_id in results:
             page = self.page_manager.read_page(page_id)
-            
+
             if not page or row_id >= len(page.records):
                 print(f"⚠️  Warning: Invalid index entry ({page_id}, {row_id})")
                 continue
-            
+
             try:
                 row = self._deserialize_row(schema, page.records[row_id])
                 rows.append(row)
             except Exception as e:
                 print(f"⚠️  Warning: Failed to deserialize row: {e}")
                 continue
-        
+
         print(f"🔍 Retrieved {len(rows)} row(s) using index '{target_index.index_name}'")
         return rows
-    
+
     def fetch_row_by_location(self, table_name: str, page_id: int, row_id: int) -> Optional[List[Any]]:
         """
         Fetch a specific row by its physical location (page_id, row_id).
         Used by index scan operators to retrieve rows efficiently.
-        
+
         Args:
             table_name: Name of the table
             page_id: Page ID where row is stored
             row_id: Row ID within the page
-            
+
         Returns:
             The row as a list of values, or None if not found
         """
         schema = self.catalog.get_table_schema(table_name)
         if not schema:
             return None
-        
+
         page = self.page_manager.read_page(page_id)
         if not page or row_id >= len(page.records):
             return None
-        
+
         try:
             return self._deserialize_row(schema, page.records[row_id])
         except Exception:
             return None
-    
-    def _filter_rows(self, rows: List[List[Any]], column_name: str, 
+
+    def _filter_rows(self, rows: List[List[Any]], column_name: str,
                     value: Any, schema: 'TableSchema') -> List[List[Any]]:
         """
         Filter rows by column value (fallback for when no index exists).
-        
+
         Args:
             rows: All rows from table
             column_name: Column to filter on
             value: Value to match
             schema: Table schema
-            
+
         Returns:
             Filtered rows
         """
@@ -273,12 +273,12 @@ class TableManager:
             if col['name'] == column_name:
                 column_index = idx
                 break
-        
+
         if column_index is None:
             return []
-        
+
         return [row for row in rows if row[column_index] == value]
-    
+
     def _serialize_row(self, schema: TableSchema, values: List[Any]) -> bytes:
         """
         Convert a row of values into binary format.
@@ -412,17 +412,17 @@ class TableManager:
 
         return page
 
-    def fetch_row_by_location(self, table_name: str, page_id: int, row_id: int) -> Optional[List[Any]]:
+    def fetch_row_by_location_v2(self, table_name: str, page_id: int, row_id: int) -> Optional[List[Any]]:
         """
-        Fetch a single row by its physical location (page_id, row_id).
-        
+        Fetch a single row by its physical location (page_id, row_id) - alternative implementation.
+
         This is used by IndexScanOperator to retrieve rows found via index lookups.
-        
+
         Args:
             table_name: Name of the table
             page_id: Page ID where the row is stored
             row_id: Row ID (offset) within the page's records list
-            
+
         Returns:
             Row as list of values, or None if not found/invalid
         """
@@ -431,7 +431,7 @@ class TableManager:
         if not schema:
             print(f"⚠️  Warning: Table '{table_name}' does not exist")
             return None
-        
+
         # Step 2: Read the page
         try:
             page = self.page_manager.read_page(page_id)
@@ -441,12 +441,12 @@ class TableManager:
         except Exception as e:
             print(f"⚠️  Warning: Failed to read page {page_id}: {e}")
             return None
-        
+
         # Step 3: Validate row_id is within bounds
         if row_id < 0 or row_id >= len(page.records):
             print(f"⚠️  Warning: Invalid row_id {row_id} (page has {len(page.records)} records)")
             return None
-        
+
         # Step 4: Deserialize the specific record
         try:
             record_bytes = page.records[row_id]

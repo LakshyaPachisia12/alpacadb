@@ -19,22 +19,22 @@ class ReverseCompare:
     """
     def __init__(self, value):
         self.value = value
-    
+
     def __lt__(self, other):
         return self.value > other.value
-    
+
     def __le__(self, other):
         return self.value >= other.value
-    
+
     def __gt__(self, other):
         return self.value < other.value
-    
+
     def __ge__(self, other):
         return self.value <= other.value
-    
+
     def __eq__(self, other):
         return self.value == other.value
-    
+
     def __ne__(self, other):
         return self.value != other.value
 
@@ -103,7 +103,7 @@ class ScanOperator(PhysicalOperator):
     def next(self) -> Optional[List[Any]]:
         if not self._opened:
             raise RuntimeError("Operator not opened")
-        
+
         if self._iterator is None:
             return None
 
@@ -325,13 +325,13 @@ class SortOperator(PhysicalOperator):
             for col_name, is_desc in self.order_by_columns:
                 col_idx = self.column_names.index(col_name.lower())
                 value = row[col_idx]
-                
+
                 # Handle None values (put them last)
                 if value is None:
                     # For DESC, None should be at the beginning (smallest)
                     # For ASC, None should be at the end (largest)
-                    value = float("-inf") if is_desc else float("inf")
-                
+                    value = float("-in") if is_desc else float("inf")
+
                 # For DESC columns, negate numeric values or use reverse comparison
                 # We'll use a tuple trick: (is_desc, value) and let Python handle it
                 # For DESC: negate if numeric, otherwise we need custom comparison
@@ -354,7 +354,7 @@ class SortOperator(PhysicalOperator):
     def next(self) -> Optional[List[Any]]:
         if not self._opened:
             raise RuntimeError("Operator not opened")
-        
+
         if self._iterator is None:
             return None
 
@@ -376,17 +376,17 @@ class IndexScanOperator(PhysicalOperator):
     """
     Index Scan Operator
     Uses a B-Tree index to find rows matching a key.
-    
+
     This operator leverages indexes for point lookups (equality predicates).
     Much faster than sequential scan for large tables.
     Handles duplicate keys by returning all matching rows.
     """
 
-    def __init__(self, table_manager, index_manager, table_name: str, 
+    def __init__(self, table_manager, index_manager, table_name: str,
                  index_name: str, key: Any, column_names: List[str]):
         """
         Initialize index scan operator.
-        
+
         Args:
             table_manager: TableManager for fetching rows
             index_manager: IndexManager for index lookups
@@ -409,7 +409,7 @@ class IndexScanOperator(PhysicalOperator):
         super().open()
         # Perform index lookup - get ALL matching rows (handles duplicates)
         results = self.index_manager.search_index_all(self.index_name, self.key)
-        
+
         # Fetch all matching rows
         self._rows = []
         for page_id, row_id in results:
@@ -418,17 +418,17 @@ class IndexScanOperator(PhysicalOperator):
             )
             if row:
                 self._rows.append(row)
-        
+
         self._current_idx = 0
 
     def next(self) -> Optional[List[Any]]:
         if not self._opened:
             raise RuntimeError("Operator not opened")
-        
+
         # Return rows one by one
         if self._current_idx >= len(self._rows):
             return None
-        
+
         row = self._rows[self._current_idx]
         self._current_idx += 1
         return row
@@ -446,16 +446,16 @@ class IndexRangeScanOperator(PhysicalOperator):
     """
     Index Range Scan Operator
     Uses a B-Tree index to find rows in a range.
-    
+
     Supports range queries like:
     - age >= 18
     - price < 100
     - date BETWEEN '2024-01-01' AND '2024-12-31'
-    
+
     Much faster than sequential scan for range predicates on indexed columns.
     """
 
-    def __init__(self, table_manager, index_manager, table_name: str, 
+    def __init__(self, table_manager, index_manager, table_name: str,
                  index_name: str, range_min: Any = None, range_max: Any = None,
                  min_inclusive: bool = True, max_inclusive: bool = True,
                  column_names: Optional[List[str]] = None,
@@ -463,7 +463,7 @@ class IndexRangeScanOperator(PhysicalOperator):
                  include_start: Optional[bool] = None, include_end: Optional[bool] = None):
         """
         Initialize index range scan operator.
-        
+
         Args:
             table_manager: TableManager for fetching rows
             index_manager: IndexManager for index range scans
@@ -501,13 +501,13 @@ class IndexRangeScanOperator(PhysicalOperator):
         super().open()
         # Perform range scan - get all matching rows
         results = self.index_manager.range_scan_index(
-            self.index_name, 
-            self.range_min, 
+            self.index_name,
+            self.range_min,
             self.range_max,
             self.min_inclusive,
             self.max_inclusive
         )
-        
+
         # Fetch all matching rows
         self._rows = []
         for page_id, row_id in results:
@@ -516,17 +516,17 @@ class IndexRangeScanOperator(PhysicalOperator):
             )
             if row:
                 self._rows.append(row)
-        
+
         self._current_idx = 0
 
     def next(self) -> Optional[List[Any]]:
         if not self._opened:
             raise RuntimeError("Operator not opened")
-        
+
         # Return rows one by one
         if self._current_idx >= len(self._rows):
             return None
-        
+
         row = self._rows[self._current_idx]
         self._current_idx += 1
         return row
@@ -956,7 +956,7 @@ class NestedLoopJoinOperator(PhysicalOperator):
             elif isinstance(node, ColumnRef):
                 # Parse qualified column name (table.column or just column)
                 col_name = node.name.lower()
-                
+
                 # Try to find in left columns
                 for i, left_col in enumerate(self.left_columns):
                     left_col_lower = left_col.lower()
@@ -964,7 +964,7 @@ class NestedLoopJoinOperator(PhysicalOperator):
                     if left_col_lower == col_name or left_col_lower.endswith('.' + col_name):
                         if i < len(left_row):
                             return left_row[i]
-                
+
                 # Try to find in right columns
                 for i, right_col in enumerate(self.right_columns):
                     right_col_lower = right_col.lower()
@@ -972,7 +972,7 @@ class NestedLoopJoinOperator(PhysicalOperator):
                     if right_col_lower == col_name or right_col_lower.endswith('.' + col_name):
                         if i < len(right_row):
                             return right_row[i]
-                
+
                 raise ValueError(f"Unknown column in join condition: {col_name}")
 
             elif isinstance(node, Literal):
