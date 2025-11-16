@@ -9,6 +9,7 @@ These operators use the Volcano/Iterator model:
 
 from typing import List, Optional, Any, Iterator
 from abc import ABC, abstractmethod
+from ..errors import ExecutionError, ColumnNotFoundError
 
 
 class ReverseCompare:
@@ -102,6 +103,9 @@ class ScanOperator(PhysicalOperator):
     def next(self) -> Optional[List[Any]]:
         if not self._opened:
             raise RuntimeError("Operator not opened")
+        
+        if self._iterator is None:
+            return None
 
         try:
             return next(self._iterator)
@@ -179,7 +183,10 @@ class FilterOperator(PhysicalOperator):
                 elif op == "OR":
                     return left or right
                 else:
-                    raise ValueError(f"Unknown operator: {op}")
+                    raise ExecutionError(
+                        f"Unknown operator: {op}",
+                        hint=f"Supported operators: =, !=, <, >, <=, >=, AND, OR. Got: {op}"
+                    )
 
             elif isinstance(node, ColumnRef):
                 # Find column index and return value from row
@@ -188,13 +195,20 @@ class FilterOperator(PhysicalOperator):
                     col_idx = self.column_names.index(col_name)
                     return row[col_idx]
                 except ValueError:
-                    raise ValueError(f"Unknown column: {col_name}")
+                    # Find table name if available (for better error message)
+                    raise ColumnNotFoundError(
+                        col_name,
+                        hint=f"Column '{col_name}' not found in table. Available columns: {', '.join(self.column_names)}"
+                    )
 
             elif isinstance(node, Literal):
                 return node.value
 
             else:
-                raise ValueError(f"Unknown node type in predicate: {type(node)}")
+                raise ExecutionError(
+                    f"Unknown node type in predicate: {type(node).__name__}",
+                    hint="Predicates can only contain column references, literals, and binary operations."
+                )
 
         return evaluate(self.predicate)
 
@@ -234,7 +248,10 @@ class ProjectOperator(PhysicalOperator):
                     idx = input_columns.index(col_lower)
                     self.column_indices.append(idx)
                 except ValueError:
-                    raise ValueError(f"Unknown column: {col}")
+                    raise ColumnNotFoundError(
+                        col,
+                        hint=f"Column '{col}' not found. Available columns: {', '.join(input_columns)}"
+                    )
 
     def open(self):
         super().open()
@@ -304,7 +321,7 @@ class SortOperator(PhysicalOperator):
 
         # Build sort key function with proper DESC handling
         def sort_key(row):
-            keys = []
+            keys: List[Any] = []
             for col_name, is_desc in self.order_by_columns:
                 col_idx = self.column_names.index(col_name.lower())
                 value = row[col_idx]
@@ -337,6 +354,9 @@ class SortOperator(PhysicalOperator):
     def next(self) -> Optional[List[Any]]:
         if not self._opened:
             raise RuntimeError("Operator not opened")
+        
+        if self._iterator is None:
+            return None
 
         try:
             return next(self._iterator)

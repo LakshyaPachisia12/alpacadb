@@ -29,6 +29,40 @@ class TokenType(Enum):
     INSERT = auto()
     UPDATE = auto()
     DELETE = auto()
+    EXPLAIN = auto()
+    
+    # Aggregate Functions
+    COUNT = auto()
+    SUM = auto()
+    AVG = auto()
+    MIN = auto()
+    MAX = auto()
+    
+    # Grouping Keywords
+    GROUP = auto()
+    HAVING = auto()
+    
+    # Aggregate Functions
+    COUNT = auto()
+    SUM = auto()
+    AVG = auto()
+    MIN = auto()
+    MAX = auto()
+    
+    # Grouping Keywords
+    GROUP = auto()
+    HAVING = auto()
+    
+    # Aggregate Functions
+    COUNT = auto()
+    SUM = auto()
+    AVG = auto()
+    MIN = auto()
+    MAX = auto()
+    
+    # Grouping Keywords
+    GROUP = auto()
+    HAVING = auto()
     
     # Clauses
     FROM = auto()
@@ -36,10 +70,16 @@ class TokenType(Enum):
     INTO = auto()
     VALUES = auto()
     SET = auto()
+    AS = auto()
     ORDER = auto()
     BY = auto()
     JOIN = auto()
     INNER = auto()
+    LEFT = auto()
+    RIGHT = auto()
+    FULL = auto()
+    OUTER = auto()
+    CROSS = auto()
     ON = auto()
     
     # Transaction Keywords
@@ -144,15 +184,29 @@ KEYWORDS = {
     'INSERT': TokenType.INSERT,
     'UPDATE': TokenType.UPDATE,
     'DELETE': TokenType.DELETE,
+    'EXPLAIN': TokenType.EXPLAIN,
+    'COUNT': TokenType.COUNT,
+    'SUM': TokenType.SUM,
+    'AVG': TokenType.AVG,
+    'MIN': TokenType.MIN,
+    'MAX': TokenType.MAX,
+    'GROUP': TokenType.GROUP,
+    'HAVING': TokenType.HAVING,
     'FROM': TokenType.FROM,
     'WHERE': TokenType.WHERE,
     'INTO': TokenType.INTO,
     'VALUES': TokenType.VALUES,
     'SET': TokenType.SET,
+    'AS': TokenType.AS,
     'ORDER': TokenType.ORDER,
     'BY': TokenType.BY,
     'JOIN': TokenType.JOIN,
     'INNER': TokenType.INNER,
+    'LEFT': TokenType.LEFT,
+    'RIGHT': TokenType.RIGHT,
+    'FULL': TokenType.FULL,
+    'OUTER': TokenType.OUTER,
+    'CROSS': TokenType.CROSS,
     'ON': TokenType.ON,
     'BEGIN': TokenType.BEGIN,
     'COMMIT': TokenType.COMMIT,

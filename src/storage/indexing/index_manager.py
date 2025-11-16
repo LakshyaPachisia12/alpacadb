@@ -111,8 +111,8 @@ class IndexManager:
             # Remove from catalog
             self.catalog.drop_index(index_name)
             
-            # Free B-Tree pages
-            self._free_btree_pages(index.root_page_id)
+            # TODO: Free B-Tree pages (requires PageManager.free_page implementation)
+            # self._free_btree_pages(index.root_page_id)
     
     def get_btree(self, index_name: str) -> Optional[BTree]:
         """Get a B-Tree index by name."""
@@ -143,11 +143,16 @@ class IndexManager:
                 if btree:
                     key = column_values[index.column_name]
                     btree.insert(key, (page_id, row_id))
+                    # Update root_page_id in case it changed
+                    index.root_page_id = btree.root_page_id
+                    self.catalog._save_catalog()
     
     def delete_entry(self, table_name: str, column_values: Dict[str, Any],
                     page_id: int, row_id: int) -> None:
         """
-        Delete specific entries from all indexes for a table.
+        Phase 3: Delete entries from all indexes for a table (incremental).
+        
+        Uses delete_entry() instead of full rebuild for better performance.
         
         Args:
             table_name: Name of the table
@@ -238,17 +243,61 @@ class IndexManager:
         if not page or not page.records:
             return
         
-        try:
-            from .btree import BTreeNode
-            node = BTreeNode.deserialize(page.records[0])
-            
-            # Recursively free child pages
-            if not node.is_leaf:
-                for child_id in node.children:
-                    self._free_btree_pages(child_id)
-            
-            # Free this page (commented out - page deallocation not implemented yet)
-            # self.page_manager.free_page(root_page_id)
-        except Exception:
-            # Silently ignore deserialization errors during cleanup
-            pass
+        # Create temporary BTree to deserialize the node
+        btree = BTree(self.page_manager)    
+        node = btree._deserialize_node(page.records[0])
+        
+        # Recursively free child pages
+        if not node.is_leaf:
+            for child_id in node.children:
+                self._free_btree_pages(child_id)
+        
+        # Free this page
+        self.page_manager.free_page(root_page_id)
+    
+    def rebuild_indexes_for_table(self, table_name: str) -> None:
+        """
+        Rebuild all indexes for a table.
+        
+        This is a temporary solution for UPDATE/DELETE operations since
+        B-Tree delete is not yet implemented. After rewriting a table,
+        we drop and recreate all indexes to maintain correctness.
+        
+        TODO: Replace with proper B-Tree delete implementation in Phase 3.
+        
+        Args:
+            table_name: Name of the table whose indexes should be rebuilt
+        """
+        # Get all indexes for this table
+        indexes = self.catalog.get_indexes_for_table(table_name)
+        
+        if not indexes:
+            return  # No indexes to rebuild
+        
+        print(f"🔄 Rebuilding {len(indexes)} index(es) for table '{table_name}'...")
+        
+        # Store index definitions
+        index_definitions = []
+        for index in indexes:
+            index_definitions.append({
+                'index_name': index.index_name,
+                'column_name': index.column_name,
+                'index_type': index.index_type
+            })
+        
+        # Drop all indexes
+        for index_def in index_definitions:
+            self.drop_index(index_def['index_name'], table_name)
+        
+        # Recreate all indexes
+        for index_def in index_definitions:
+            self.create_index(
+                index_def['index_name'],
+                table_name,
+                index_def['column_name'],
+                index_def['index_type']
+            )
+        
+        print(f"✅ Index rebuild complete")
+
+

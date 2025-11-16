@@ -7,7 +7,7 @@ import struct
 import pickle
 from typing import Any, List, Optional, Tuple
 from ..page_manager import PageManager
-
+from ..page import Page, PAGE_TYPE_INDEX
 
 class BTreeNode:
     """
@@ -33,7 +33,11 @@ class BTreeNode:
         self.keys: List[Any] = []
         self.values: List[Tuple[int, int]] = []  # Only for leaf nodes
         self.children: List[int] = []  # Page IDs of child nodes
-    
+        self.values: List[Tuple[int, int]] = []  # (page_id, row_id) pairs
+        self.order = order
+        self.page_id: Optional[int] = None
+        self.next_leaf_page_id: Optional[int] = None  # For range scans: link to next leaf
+
     def is_full(self) -> bool:
         """Check if node is full and needs splitting."""
         return len(self.keys) >= self.order - 1

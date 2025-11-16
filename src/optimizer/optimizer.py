@@ -8,6 +8,8 @@ Phase 1: Simple equality predicate optimization with index selection.
 from typing import Optional, Any
 from dataclasses import dataclass
 from ..query.ast_nodes import SelectNode, BinaryOp, ColumnRef, Literal
+from .cost_estimator import cost_seq_scan, cost_index_scan
+from ..errors import OptimizerError, TableNotFoundError
 
 
 @dataclass
@@ -73,13 +75,18 @@ class QueryOptimizer:
         Args:
             catalog: Database catalog for schema lookups
             index_manager: Optional IndexManager for index availability checks
+            table_manager: Optional TableManager for table size estimation
         """
         self.catalog = catalog
         self.index_manager = index_manager
+        self.table_manager = table_manager
     
     def optimize(self, select_node: SelectNode) -> QueryPlan:
         """
         Optimize a SELECT query and return an execution plan.
+        
+        Uses cost-based optimization: compares SeqScan vs IndexScan costs
+        and chooses the cheaper option.
         
         Args:
             select_node: Parsed SELECT AST node
@@ -98,13 +105,46 @@ class QueryOptimizer:
                 full_predicate=where_clause
             )
         
-        # Rule 2: Try to find indexable predicate (equality or range)
+        # Rule 2: Try to find a simple equality predicate on an indexed column
         index_opportunity = self._find_index_opportunity(table_name, where_clause)
         
         if index_opportunity:
-            # Found an index we can use!
-            if index_opportunity[0] == 'equality':
-                _, index_name, column_name, search_key = index_opportunity
+            # Found a potential index. Use cost model (Phase 2) to decide.
+            index_name, column_name, search_key = index_opportunity
+
+            # Gather stats
+            table_stats = self.catalog.get_table_stats(table_name) if hasattr(self.catalog, 'get_table_stats') else None
+            index_stats = self.catalog.get_index_stats(index_name) if hasattr(self.catalog, 'get_index_stats') else None
+
+            # If stats are very incomplete (no rows recorded), prefer index (rule-based fallback)
+            if not table_stats or table_stats.get('num_rows', 0) == 0:
+                use_index = True
+            else:
+                try:
+                    seq_cost = cost_seq_scan(table_stats)
+                    idx_cost = cost_index_scan(table_stats, index_stats, predicate_type='eq')
+                    
+                    # Hybrid decision: prefer index if selectivity is high (unique/near-unique)
+                    # even if costs are close, since indexes exist for a reason
+                    num_rows = table_stats.get('num_rows', 0)
+                    num_distinct = index_stats.get('num_distinct') if index_stats else None
+                    
+                    if num_distinct and num_rows > 0:
+                        selectivity = 1.0 / num_distinct
+                        # If highly selective (< 50% of rows), strongly prefer index
+                        # This balances cost-based optimization with practical index usage
+                        if selectivity < 0.5:
+                            use_index = True
+                        else:
+                            use_index = idx_cost <= seq_cost
+                    else:
+                        # No selectivity info - use pure cost comparison
+                        use_index = idx_cost <= seq_cost
+                except Exception:
+                    # Fallback to rule-based decision if cost estimation fails
+                    use_index = True
+
+            if use_index:
                 return QueryPlan(
                     plan_type='IndexScan',
                     table_name=table_name,
@@ -225,7 +265,8 @@ class QueryOptimizer:
             if right_opportunity:
                 return right_opportunity
         
-        # Case 4: OR expression - cannot use index (would need to union results)
+        # Case 3: OR expression - cannot use index (would need to union results)
+        # Future enhancement: could use bitmap index scans
         
         return None
     
@@ -275,4 +316,85 @@ class QueryOptimizer:
         if plan.full_predicate:
             lines.append(f"  Additional Filters: {plan.full_predicate}")
         
+        # Add cost estimation
+        cost = self.estimate_cost(plan)
+        lines.append(f"  Estimated Cost: {cost:.2f}")
+        
         return '\n'.join(lines)
+    
+    def estimate_cost(self, plan: QueryPlan) -> float:
+        """
+        Estimate the cost of executing a query plan.
+        
+        Cost model:
+        - SeqScan: cost = number of pages * page_read_cost
+        - IndexScan: cost = index_lookup_cost + result_fetch_cost
+        
+        Args:
+            plan: Query plan to estimate
+            
+        Returns:
+            Estimated cost (lower is better)
+        """
+        table_name = plan.table_name
+        
+        # Get table statistics
+        table_schema = self.catalog.get_table_schema(table_name)
+        if not table_schema:
+            return float('inf')  # Table doesn't exist
+        
+        # Estimate table size (number of rows)
+        # For now, we'll try to get actual count if possible
+        num_rows = self._estimate_table_size(table_name)
+        
+        # Cost constants
+        PAGE_READ_COST = 1.0  # Cost to read one page
+        INDEX_LOOKUP_COST = 2.0  # Cost for index traversal
+        INDEX_FETCH_COST = 0.5  # Cost per row fetched via index
+        
+        if plan.plan_type == 'SeqScan':
+            # Sequential scan: read all pages
+            # Estimate pages needed (assuming ~100 rows per page for simplicity)
+            estimated_pages = max(1, num_rows / 100)
+            cost = estimated_pages * PAGE_READ_COST
+            
+            # Add filter cost (0.1 per row checked)
+            if plan.full_predicate:
+                cost += num_rows * 0.1
+            
+        elif plan.plan_type == 'IndexScan':
+            # Index scan: lookup + fetch
+            cost = INDEX_LOOKUP_COST
+            
+            # Estimate selectivity (what fraction of rows match)
+            # For equality predicates, assume high selectivity (few matches)
+            # For now, estimate 1-5% of rows match (optimistic)
+            estimated_matches = max(1, num_rows * 0.01) if num_rows > 100 else 1
+            
+            # Fetch cost scales with number of matches
+            cost += estimated_matches * INDEX_FETCH_COST
+            
+            # Additional filter cost for remaining predicates
+            if plan.full_predicate:
+                cost += estimated_matches * 0.1
+        else:
+            cost = float('inf')
+        
+        return cost
+    
+    def _estimate_table_size(self, table_name: str) -> int:
+        """
+        Estimate the number of rows in a table.
+        
+        For now, we try to get actual count if table_manager is available.
+        Otherwise, estimate based on page count.
+        """
+        # Try to get actual row count if we have access to table_manager
+        if self.table_manager:
+            try:
+                rows = self.table_manager.select_all(table_name)
+                return len(rows)
+            except:
+                pass
+        # In a real implementation, we'd maintain statistics
+        return 100  # Default estimate

@@ -5,7 +5,7 @@ Each node represents a parsed SQL command structure.
 """
 
 from typing import List, Optional, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -91,6 +91,47 @@ class DropIndexNode(ASTNode):
         return f"DropIndexNode(index={self.index_name}, table={self.table_name})"
 
 
+# ==================== Aggregate Nodes ====================
+
+@dataclass
+class AggregateFunction(ASTNode):
+    """
+    Represents an aggregate function: COUNT(*), SUM(column), AVG(column), etc.
+    
+    Example:
+        COUNT(*)
+        SUM(salary)
+        AVG(age)
+        MIN(price)
+        MAX(score)
+    """
+    func_name: str  # 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX'
+    column: Optional[str] = None  # None for COUNT(*)
+    alias: Optional[str] = None
+    
+    def __repr__(self):
+        col = '*' if self.column is None else self.column
+        alias = f" AS {self.alias}" if self.alias else ""
+        return f"{self.func_name}({col}){alias}"
+
+
+@dataclass
+class GroupByNode(ASTNode):
+    """
+    Represents GROUP BY clause with optional HAVING.
+    
+    Example:
+        GROUP BY department HAVING COUNT(*) > 5
+    """
+    columns: List[str]
+    having_clause: Optional['BinaryOp'] = None
+    
+    def __repr__(self):
+        cols = ', '.join(self.columns)
+        having = f" HAVING {self.having_clause}" if self.having_clause else ""
+        return f"GROUP BY {cols}{having}"
+
+
 # ==================== DML Nodes ====================
 
 @dataclass
@@ -146,23 +187,29 @@ class DeleteNode(ASTNode):
 @dataclass
 class SelectNode(ASTNode):
     """
-    Represents: SELECT columns FROM table WHERE condition ORDER BY column
+    Represents: SELECT columns FROM table [JOIN ...] [WHERE condition] [GROUP BY cols] [HAVING condition] [ORDER BY column]
     
     Example:
-        SELECT id, name FROM users WHERE age > 18 ORDER BY name ASC
+        SELECT u.name, o.total FROM users u INNER JOIN orders o ON u.id = o.user_id WHERE u.age > 18
     """
-    columns: List[str]  # ['*'] or ['id', 'name']
+    columns: List[str]  # ['*'] or ['id', 'name'] or can include aggregate functions
     table_name: str
     where_clause: Optional['BinaryOp'] = None
+    group_by: Optional['GroupByNode'] = None
     order_by: Optional[tuple] = None  # (column, 'ASC'|'DESC')
-    join_clause: Optional['JoinClause'] = None
+    join_clause: Optional['JoinClause'] = None  # For backward compatibility
+    aggregates: List['AggregateFunction'] = field(default_factory=list)
+    alias: Optional[str] = None
+    joins: List['JoinClause'] = field(default_factory=list)  # New: multiple joins
+    is_explain: bool = False  # Whether this is an EXPLAIN query
     
     def __repr__(self):
         cols = ', '.join(self.columns)
         where = f" WHERE {self.where_clause}" if self.where_clause else ""
+        group = f" {self.group_by}" if self.group_by else ""
         order = f" ORDER BY {self.order_by[0]} {self.order_by[1]}" if self.order_by else ""
         join = f" JOIN {self.join_clause}" if self.join_clause else ""
-        return f"SelectNode(columns=[{cols}], table={self.table_name}{where}{order}{join})"
+        return f"SelectNode(columns=[{cols}], table={self.table_name}{where}{group}{order}{join})"
 
 
 # ==================== Expression Nodes ====================
@@ -208,17 +255,23 @@ class Literal:
 @dataclass
 class JoinClause:
     """
-    Represents: INNER JOIN table ON condition
+    Represents join clauses: [INNER|LEFT|RIGHT|FULL|CROSS] JOIN table [AS alias] [ON condition]
     
-    Example:
+    Examples:
         INNER JOIN orders ON users.id = orders.user_id
+        LEFT JOIN orders o ON users.id = o.user_id
+        CROSS JOIN products
+        FULL OUTER JOIN categories c ON p.category_id = c.id
     """
-    join_type: str  # 'INNER' (only type supported in v1.0)
+    join_type: str  # 'INNER', 'LEFT', 'RIGHT', 'FULL', 'CROSS'
     table_name: str
-    on_condition: BinaryOp
+    alias: Optional[str] = None
+    on_condition: Optional[BinaryOp] = None  # None for CROSS JOIN
     
     def __repr__(self):
-        return f"{self.join_type} JOIN {self.table_name} ON {self.on_condition}"
+        alias_str = f" AS {self.alias}" if self.alias else ""
+        on_str = f" ON {self.on_condition}" if self.on_condition else ""
+        return f"{self.join_type} JOIN {self.table_name}{alias_str}{on_str}"
 
 
 # ==================== Transaction Nodes ====================

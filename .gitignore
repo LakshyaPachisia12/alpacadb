@@ -41,9 +41,7 @@ Thumbs.db
 # Testing
 .pytest_cache/
 .coverage
-<<<<<<< Updated upstream
 htmlcov/"venv/" 
-=======
 htmlcov/
 
 # Test/demo files in root (should be in tests/ directory)
@@ -52,9 +50,11 @@ htmlcov/
 /demo_new_features.py
 /measure_true_cost.py
 
+htmlcov/
+
+
 # Project specs
 specs/
 
 # Virtual environments
->>>>>>> Stashed changes
 v_alpaca/

@@ -119,6 +119,8 @@ class IndexPerformanceTester:
         """Test index creation time on large dataset."""
         print("\n🔍 Testing index creation performance...")
         
+        assert self.index_manager is not None, "index_manager not initialized"
+        
         start_time = time.time()
         # Use IndexManager to actually build the index
         self.index_manager.create_index('idx_email', 'users', 'email', 
@@ -129,12 +131,56 @@ class IndexPerformanceTester:
         
         return elapsed
     
+    def fetch_row_by_location(self, table_name: str, page_id: int, row_id: int):
+        """
+        Fetch a single row by its physical location.
+        
+        Args:
+            table_name: Name of the table
+            page_id: Page ID where row is stored
+            row_id: Row ID within the page
+            
+        Returns:
+            Row as list of values, or None if not found
+        """
+        assert self.catalog is not None, "catalog not initialized"
+        assert self.page_manager is not None, "page_manager not initialized"
+        assert self.table_manager is not None, "table_manager not initialized"
+        
+        schema = self.catalog.get_table_schema(table_name)
+        if not schema:
+            return None
+            
+        page = self.page_manager.read_page(page_id)
+        if not page or row_id >= len(page.records):
+            return None
+            
+        try:
+            record_bytes = page.records[row_id]
+            row = self.table_manager._deserialize_row(schema, record_bytes)
+            return row
+        except Exception as e:
+            print(f"⚠️  Warning: Failed to fetch row: {e}")
+            return None
+    
     def test_query_without_index(self, num_queries=100):
         """Test query performance WITHOUT index (full table scan)."""
         print(f"\n🔍 Testing {num_queries} queries WITHOUT index (baseline)...")
         
+        assert self.catalog is not None, "catalog not initialized"
+        assert self.table_manager is not None, "table_manager not initialized"
+        assert self.index_manager is not None, "index_manager not initialized"
+        
         # Drop index if exists
-        self.catalog.drop_index('idx_email')
+        index = self.catalog.get_index('idx_email')
+        if index:
+            # Remove from IndexManager cache
+            if 'idx_email' in self.index_manager._btrees:
+                del self.index_manager._btrees['idx_email']
+            # Remove from catalog
+            if 'idx_email' in self.catalog.indexes:
+                del self.catalog.indexes['idx_email']
+                self.catalog._save_catalog()
         
         # Get column index for 'email' (should be index 2: id=0, name=1, email=2, age=3, city=4)
         email_col_idx = 2
