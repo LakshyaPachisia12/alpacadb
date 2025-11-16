@@ -345,23 +345,26 @@ class TestExecutorErrorHandling:
 
     def test_select_nonexistent_table(self, db_components):
         """Test SELECT from non-existent table."""
+        from src.errors import TableNotFoundError
         executor = db_components['executor']
 
-        with pytest.raises(ValueError, match="Table 'nonexistent' does not exist"):
+        with pytest.raises(TableNotFoundError, match="Table \"nonexistent\" does not exist"):
             execute_query(executor, "SELECT * FROM nonexistent;")
 
     def test_insert_nonexistent_table(self, db_components):
         """Test INSERT into non-existent table."""
+        from src.errors import TableNotFoundError
         executor = db_components['executor']
 
-        with pytest.raises(ValueError, match="Table 'nonexistent' does not exist"):
+        with pytest.raises(TableNotFoundError, match="Table \"nonexistent\" does not exist"):
             execute_query(executor, "INSERT INTO nonexistent VALUES (1);")
 
     def test_invalid_column_reference(self, populated_db):
         """Test referencing non-existent column in WHERE."""
+        from src.errors import ColumnNotFoundError
         executor = populated_db['executor']
 
-        with pytest.raises(ValueError, match="Unknown column"):
+        with pytest.raises(ColumnNotFoundError, match='Column \"nonexistent\" does not exist'):
             execute_query(executor, "SELECT * FROM employees WHERE nonexistent = 1;")
 
 

@@ -82,9 +82,10 @@ class TestOptimizerPlanSelection:
         """Test that optimizer chooses IndexScan when index exists."""
         catalog = temp_db['catalog']
         index_manager = temp_db['index_manager']
+        table_manager = temp_db['table_manager']
         
         # Create index
-        index_manager.create_index('idx_email', 'users', 'email')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
         
         optimizer = QueryOptimizer(catalog, index_manager)
         sql = "SELECT * FROM users WHERE email = 'user5@test.com';"
@@ -100,9 +101,10 @@ class TestOptimizerPlanSelection:
         """Test that optimizer chooses SeqScan when no WHERE clause."""
         catalog = temp_db['catalog']
         index_manager = temp_db['index_manager']
+        table_manager = temp_db['table_manager']
         
         # Create index
-        index_manager.create_index('idx_email', 'users', 'email')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
         
         optimizer = QueryOptimizer(catalog, index_manager)
         sql = "SELECT * FROM users;"
@@ -116,9 +118,10 @@ class TestOptimizerPlanSelection:
         """Test AND condition where one column is indexed."""
         catalog = temp_db['catalog']
         index_manager = temp_db['index_manager']
+        table_manager = temp_db['table_manager']
         
         # Create index on email
-        index_manager.create_index('idx_email', 'users', 'email')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
         
         optimizer = QueryOptimizer(catalog, index_manager)
         sql = "SELECT * FROM users WHERE email = 'user5@test.com' AND age > 25;"
@@ -132,12 +135,13 @@ class TestOptimizerPlanSelection:
         assert plan.search_key == 'user5@test.com'
     
     def test_non_equality_predicate_uses_seqscan(self, temp_db):
-        """Test that non-equality predicates fall back to SeqScan."""
+        """Test that range predicates now use IndexRangeScan (Phase 3)."""
         catalog = temp_db['catalog']
         index_manager = temp_db['index_manager']
+        table_manager = temp_db['table_manager']
         
         # Create index on age
-        index_manager.create_index('idx_age', 'users', 'age')
+        index_manager.create_index('idx_age', 'users', 'age', table_manager)
         
         optimizer = QueryOptimizer(catalog, index_manager)
         sql = "SELECT * FROM users WHERE age > 25;"
@@ -145,17 +149,18 @@ class TestOptimizerPlanSelection:
         
         plan = optimizer.optimize(ast)
         
-        # Range queries not yet supported in Phase 1
-        assert plan.plan_type == 'SeqScan'
+        # Phase 3: Range queries now supported via IndexRangeScan
+        assert plan.plan_type == 'IndexRangeScan'
     
     def test_or_condition_uses_seqscan(self, temp_db):
         """Test that OR conditions fall back to SeqScan."""
         catalog = temp_db['catalog']
         index_manager = temp_db['index_manager']
+        table_manager = temp_db['table_manager']
         
         # Create indexes
-        index_manager.create_index('idx_email', 'users', 'email')
-        index_manager.create_index('idx_age', 'users', 'age')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
+        index_manager.create_index('idx_age', 'users', 'age', table_manager)
         
         optimizer = QueryOptimizer(catalog, index_manager)
         sql = "SELECT * FROM users WHERE email = 'user5@test.com' OR age = 25;"
@@ -170,10 +175,11 @@ class TestOptimizerPlanSelection:
         """Test that optimizer chooses first indexed column in AND."""
         catalog = temp_db['catalog']
         index_manager = temp_db['index_manager']
+        table_manager = temp_db['table_manager']
         
         # Create indexes on both columns
-        index_manager.create_index('idx_email', 'users', 'email')
-        index_manager.create_index('idx_age', 'users', 'age')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
+        index_manager.create_index('idx_age', 'users', 'age', table_manager)
         
         optimizer = QueryOptimizer(catalog, index_manager)
         sql = "SELECT * FROM users WHERE email = 'user5@test.com' AND age = 25;"
@@ -257,9 +263,10 @@ class TestOptimizerIntegrationWithExecutor:
         """Test that executor uses IndexScan when index exists."""
         executor = temp_db['executor']
         index_manager = temp_db['index_manager']
+        table_manager = temp_db['table_manager']
         
         # Create index
-        index_manager.create_index('idx_email', 'users', 'email')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
         
         sql = "SELECT * FROM users WHERE email = 'bob@test.com';"
         rows, columns = self._execute_sql(executor, sql)
@@ -272,6 +279,7 @@ class TestOptimizerIntegrationWithExecutor:
         """Test that results are identical with IndexScan and SeqScan."""
         executor = temp_db['executor']
         index_manager = temp_db['index_manager']
+        table_manager = temp_db['table_manager']
         
         # Query without index
         sql = "SELECT * FROM users WHERE email = 'charlie@test.com';"
@@ -279,7 +287,7 @@ class TestOptimizerIntegrationWithExecutor:
         assert executor.last_plan == 'SeqScan'
         
         # Create index
-        index_manager.create_index('idx_email', 'users', 'email')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
         
         # Query with index
         rows_indexscan, _ = self._execute_sql(executor, sql)
@@ -292,8 +300,9 @@ class TestOptimizerIntegrationWithExecutor:
         """Test IndexScan works with column projection."""
         executor = temp_db['executor']
         index_manager = temp_db['index_manager']
+        table_manager = temp_db['table_manager']
         
-        index_manager.create_index('idx_email', 'users', 'email')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
         
         sql = "SELECT name, age FROM users WHERE email = 'diana@test.com';"
         rows, columns = self._execute_sql(executor, sql)
@@ -313,7 +322,7 @@ class TestOptimizerIntegrationWithExecutor:
         table_manager.insert_row('users', [6, 'Frank', 'frank@test.com', 40])
         table_manager.insert_row('users', [7, 'Grace', 'grace@test.com', 22])
         
-        index_manager.create_index('idx_age', 'users', 'age')
+        index_manager.create_index('idx_age', 'users', 'age', table_manager)
         
         sql = "SELECT * FROM users WHERE age = 30 ORDER BY name ASC;"
         rows, _ = self._execute_sql(executor, sql)
@@ -326,8 +335,9 @@ class TestOptimizerIntegrationWithExecutor:
         """Test IndexScan with additional filter (AND condition)."""
         executor = temp_db['executor']
         index_manager = temp_db['index_manager']
+        table_manager = temp_db['table_manager']
         
-        index_manager.create_index('idx_email', 'users', 'email')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
         
         sql = "SELECT * FROM users WHERE email = 'alice@test.com' AND age > 20;"
         rows, _ = self._execute_sql(executor, sql)
@@ -340,8 +350,9 @@ class TestOptimizerIntegrationWithExecutor:
         """Test IndexScan returns empty when key not found."""
         executor = temp_db['executor']
         index_manager = temp_db['index_manager']
+        table_manager = temp_db['table_manager']
         
-        index_manager.create_index('idx_email', 'users', 'email')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
         
         sql = "SELECT * FROM users WHERE email = 'nonexistent@test.com';"
         rows, _ = self._execute_sql(executor, sql)

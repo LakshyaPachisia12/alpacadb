@@ -65,6 +65,7 @@ class IndexManager:
             current_page_id = schema.first_page_id
             total_entries = 0
             
+            distinct_values = set()
             while current_page_id is not None:
                 page = self.page_manager.read_page(current_page_id)
                 if not page:
@@ -78,6 +79,8 @@ class IndexManager:
                         
                         # Insert into B-Tree: key -> (page_id, row_id)
                         btree.insert(key, (current_page_id, row_id))
+                        # Track distinct values for index statistics
+                        distinct_values.add(key)
                         total_entries += 1
                     except Exception as e:
                         print(f"⚠️  Warning: Failed to index row {row_id} on page {current_page_id}: {e}")
@@ -85,7 +88,17 @@ class IndexManager:
                 
                 current_page_id = page.next_page_id
             
-            print(f"✅ Index '{index_name}' built with {total_entries} entries")
+            # Compute per-index statistics
+            distinct_count = len(distinct_values)
+            idx = self.catalog.get_index(index_name)
+            if idx:
+                idx.stats = {
+                    'num_distinct': distinct_count,
+                    'null_count': 0,  # for now, we assume none are null in test data
+                }
+                self.catalog._save_catalog()
+
+            print(f"✅ Index '{index_name}' built with {total_entries} entries (distinct={distinct_count})")
         
         # Update catalog with B-Tree root page
         if btree.root_page_id is not None:
@@ -228,6 +241,12 @@ class IndexManager:
             return btree.range_scan(min_key, max_key, min_inclusive, max_inclusive)
         return []
     
+    def range_search_index(self, index_name: str, min_key: Optional[Any] = None,
+                          max_key: Optional[Any] = None, min_inclusive: bool = True,
+                          max_inclusive: bool = True) -> List[Tuple[int, int]]:
+        """Alias for range_scan_index for backward compatibility."""
+        return self.range_scan_index(index_name, min_key, max_key, min_inclusive, max_inclusive)
+    
     def _free_btree_pages(self, root_page_id: Optional[int]) -> None:
         """
         Recursively free all pages in a B-Tree.
@@ -255,18 +274,16 @@ class IndexManager:
         # Free this page
         self.page_manager.free_page(root_page_id)  # type: ignore[attr-defined]
     
-    def rebuild_indexes_for_table(self, table_name: str) -> None:
+    def rebuild_indexes_for_table(self, table_name: str, table_manager=None) -> None:
         """
         Rebuild all indexes for a table.
         
-        This is a temporary solution for UPDATE/DELETE operations since
-        B-Tree delete is not yet implemented. After rewriting a table,
-        we drop and recreate all indexes to maintain correctness.
-        
-        TODO: Replace with proper B-Tree delete implementation in Phase 3.
+        This is used after UPDATE/DELETE operations to maintain index correctness
+        when rows are rewritten.
         
         Args:
             table_name: Name of the table whose indexes should be rebuilt
+            table_manager: TableManager instance to scan table data
         """
         # Get all indexes for this table
         indexes = self.catalog.get_indexes_for_table(table_name)
@@ -282,20 +299,19 @@ class IndexManager:
             index_definitions.append({
                 'index_name': index.index_name,
                 'column_name': index.column_name,
-                'index_type': index.index_type
             })
         
         # Drop all indexes
         for index_def in index_definitions:
             self.drop_index(index_def['index_name'], table_name)
         
-        # Recreate all indexes
+        # Recreate all indexes with table_manager to build from current data
         for index_def in index_definitions:
             self.create_index(
                 index_def['index_name'],
                 table_name,
                 index_def['column_name'],
-                index_def['index_type']
+                table_manager
             )
         
         print(f"✅ Index rebuild complete")

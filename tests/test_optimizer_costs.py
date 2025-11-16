@@ -71,7 +71,7 @@ class TestCostBasedPlanSelection:
             table_manager.insert_row('users', [i, f'user{i}@test.com'])
 
         # Create index on email (unique)
-        index_manager.create_index('idx_email', 'users', 'email')
+        index_manager.create_index('idx_email', 'users', 'email', table_manager)
 
         # Equality predicate on indexed column
         rows, _ = self.exec_sql(executor, "SELECT * FROM users WHERE email = 'user5@test.com';")
@@ -99,7 +99,7 @@ class TestCostBasedPlanSelection:
             table_manager.insert_row('products', [i, 'A' if i % 2 == 0 else 'B'])
 
         # Create index on category (non-unique, 50% selectivity)
-        index_manager.create_index('idx_cat', 'products', 'category')
+        index_manager.create_index('idx_cat', 'products', 'category', table_manager)
 
         # Equality predicate on low-selectivity column
         rows, _ = self.exec_sql(executor, "SELECT * FROM products WHERE category = 'A';")
@@ -127,7 +127,7 @@ class TestCostBasedPlanSelection:
             table_manager.insert_row('big_users', [i, f'user{i}@test.com'])
 
         # Create index on email (unique)
-        index_manager.create_index('idx_email_big', 'big_users', 'email')
+        index_manager.create_index('idx_email_big', 'big_users', 'email', table_manager)
 
         # Equality predicate on indexed column
         rows, _ = self.exec_sql(executor, "SELECT * FROM big_users WHERE email = 'user1500@test.com';")
@@ -150,7 +150,7 @@ class TestCostBasedPlanSelection:
         catalog.create_table('t', columns)
         for i in range(50):
             table_manager.insert_row('t', [i, i % 5])
-        index_manager.create_index('idx_v', 't', 'v')
+        index_manager.create_index('idx_v', 't', 'v', table_manager)
 
         # Manually wipe stats to simulate missing values
         idx = catalog.get_index('idx_v')

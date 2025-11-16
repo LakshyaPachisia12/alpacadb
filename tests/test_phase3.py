@@ -159,8 +159,8 @@ class TestPhase3IndexRangeScan:
             row_data = [i, f'Employee{i}', i * 10000]  # List, not dict!
             self.table_manager.insert_row('employees', row_data)
         
-        # Create index on salary
-        self.index_manager.create_index('idx_salary', 'employees', 'salary')
+        # Create index on salary - pass table_manager to build index
+        self.index_manager.create_index('idx_salary', 'employees', 'salary', self.table_manager)
     
     def teardown_method(self):
         """Clean up test environment"""
@@ -240,11 +240,11 @@ class TestPhase3IncrementalMaintenance:
         
         # Insert test data
         for i in range(1, 21):
-            row_data = [i, f'Product{i}', i * 100]  # List, not dict!
+            row_data = [i, f'Product{i}', i * 100]
             self.table_manager.insert_row('products', row_data)
         
-        # Create index on price
-        self.index_manager.create_index('idx_price', 'products', 'price')
+        # Create index on price - pass table_manager to build index
+        self.index_manager.create_index('idx_price', 'products', 'price', self.table_manager)
     
     def teardown_method(self):
         """Clean up test environment"""

@@ -161,8 +161,23 @@ class PageManager:
         Always call this before program exit!
         """
         if self.file_handle:
+            # Ensure OS flush and release
+            try:
+                self.file_handle.flush()
+                os.fsync(self.file_handle.fileno())
+            except Exception:
+                pass
+
             self.file_handle.close()
             self.file_handle = None
+            # On Windows the file might still be locked for a short while; give the OS
+            # a small moment to release resources before tests attempt file removal.
+            try:
+                import time
+                time.sleep(0.05)
+            except Exception:
+                pass
+
             print("🔒 Database file closed")
     
     def __del__(self):

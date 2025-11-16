@@ -54,8 +54,15 @@ class Parser:
         """
         try:
             return self._statement()
-        except (ParserError, AlpacaSyntaxError) as e:
-            raise e
+        except AlpacaSyntaxError as e:
+            raise ParserError(
+                e.message,
+                token=e.token,
+                hint=e.hint,
+                context=e.context
+            ) from e
+        except ParserError:
+            raise
         except Exception as e:
             current_token = self._peek()
             raise ParserError(
@@ -647,8 +654,12 @@ class Parser:
         
         # Optional AS alias
         alias = None
-        if self._check(TokenType.IDENTIFIER) and self._peek().value.upper() == 'AS':
-            self._consume(TokenType.IDENTIFIER)  # consume 'AS'
+        if self._check(TokenType.AS):
+            self._consume(TokenType.AS)
+            alias_token = self._consume(TokenType.IDENTIFIER)
+            alias = alias_token.value
+        elif self._check(TokenType.IDENTIFIER):
+            # Support implicit aliases without the AS keyword
             alias_token = self._consume(TokenType.IDENTIFIER)
             alias = alias_token.value
         
@@ -754,18 +765,20 @@ class Parser:
             name = 'Alice'
             id != 5
         """
-        # Left side (column reference)
-        if not self._check(TokenType.IDENTIFIER):
+        # Left side can be a column reference or aggregate function
+        if self._check_aggregate_function():
+            left = self._parse_aggregate_function()
+        elif self._check(TokenType.IDENTIFIER):
+            left_token = self._consume(TokenType.IDENTIFIER)
+            left = ColumnRef(left_token.value)
+        else:
             token = self._peek()
             raise AlpacaSyntaxError(
-                f"Expected column name at line {token.line}, column {token.column}, but got '{token.lexeme}'",
-                hint="Comparison operations require a column name on the left side. Example: age > 25",
+                f"Expected column name or aggregate function at line {token.line}, column {token.column}, but got '{token.lexeme}'",
+                hint="Comparisons require a column/aggregate on the left side. Example: COUNT(*) > 5",
                 token=token.lexeme,
                 context=f"Line {token.line}, Column {token.column}"
             )
-        
-        left_token = self._consume(TokenType.IDENTIFIER)
-        left = ColumnRef(left_token.value)
         
         # Operator
         op_token = self._peek()
@@ -790,7 +803,9 @@ class Parser:
             )
         
         # Right side (column reference or literal value)
-        if self._check(TokenType.IDENTIFIER):
+        if self._check_aggregate_function():
+            right = self._parse_aggregate_function()
+        elif self._check(TokenType.IDENTIFIER):
             # Column reference
             right_token = self._consume(TokenType.IDENTIFIER)
             right = ColumnRef(right_token.value)

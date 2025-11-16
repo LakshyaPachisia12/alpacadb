@@ -7,7 +7,7 @@ These operators use the Volcano/Iterator model:
 - Enables pipelining and efficient memory usage
 """
 
-from typing import List, Optional, Any, Iterator
+from typing import List, Optional, Any, Iterator, Dict
 from abc import ABC, abstractmethod
 from ..errors import ExecutionError, ColumnNotFoundError
 
@@ -456,8 +456,11 @@ class IndexRangeScanOperator(PhysicalOperator):
     """
 
     def __init__(self, table_manager, index_manager, table_name: str, 
-                 index_name: str, range_min: Any, range_max: Any,
-                 min_inclusive: bool, max_inclusive: bool, column_names: List[str]):
+                 index_name: str, range_min: Any = None, range_max: Any = None,
+                 min_inclusive: bool = True, max_inclusive: bool = True,
+                 column_names: Optional[List[str]] = None,
+                 start_key: Any = None, end_key: Any = None,
+                 include_start: Optional[bool] = None, include_end: Optional[bool] = None):
         """
         Initialize index range scan operator.
         
@@ -477,11 +480,20 @@ class IndexRangeScanOperator(PhysicalOperator):
         self.index_manager = index_manager
         self.table_name = table_name
         self.index_name = index_name
+        if start_key is not None:
+            range_min = start_key
+        if end_key is not None:
+            range_max = end_key
+        if include_start is not None:
+            min_inclusive = include_start
+        if include_end is not None:
+            max_inclusive = include_end
+
         self.range_min = range_min
         self.range_max = range_max
         self.min_inclusive = min_inclusive
         self.max_inclusive = max_inclusive
-        self.column_names = column_names
+        self.column_names = column_names or []
         self._rows = []
         self._current_idx = 0
 
@@ -548,6 +560,9 @@ class AggregateOperator(PhysicalOperator):
         self.column_names = column_names or []  # For evaluating HAVING predicates
         self._results = []
         self._current_idx = 0
+        self._group_column_map: Dict[str, int] = {col.lower(): idx for idx, col in enumerate(self.group_by_columns)}
+        self._aggregate_alias_map: Dict[str, int] = {}
+        self._aggregate_function_map: Dict[str, int] = {}
 
     def open(self):
         super().open()
@@ -647,6 +662,9 @@ class AggregateOperator(PhysicalOperator):
 
             results.append(result_row)
 
+        # Build metadata for HAVING evaluation
+        self._build_result_column_maps()
+
         # Apply HAVING filter if present
         if self.having_predicate:
             filtered_results = []
@@ -657,13 +675,32 @@ class AggregateOperator(PhysicalOperator):
 
         return results
 
+    def _build_result_column_maps(self) -> None:
+        """Prepare lookup tables for HAVING clause evaluation."""
+        self._group_column_map = {col.lower(): idx for idx, col in enumerate(self.group_by_columns)}
+        base_idx = len(self.group_by_columns)
+        self._aggregate_alias_map = {}
+        self._aggregate_function_map = {}
+
+        for offset, agg in enumerate(self.aggregates):
+            result_idx = base_idx + offset
+            key = self._get_aggregate_key(agg.func_name, agg.column)
+            self._aggregate_function_map[key] = result_idx
+            if agg.alias:
+                self._aggregate_alias_map[agg.alias.lower()] = result_idx
+
+    @staticmethod
+    def _get_aggregate_key(func_name: str, column: Optional[str]) -> str:
+        column_part = (column.lower() if column else '*')
+        return f"{func_name.upper()}::{column_part}"
+
     def _evaluate_having(self, row: List[Any]) -> bool:
         """Evaluate HAVING predicate on an aggregated row."""
         if self.having_predicate is None:
             return True
 
         # Import here to avoid circular dependency
-        from ..query.ast_nodes import BinaryOp, ColumnRef, Literal
+        from ..query.ast_nodes import BinaryOp, ColumnRef, Literal, AggregateFunction
 
         def evaluate(node):
             if isinstance(node, BinaryOp):
@@ -693,22 +730,23 @@ class AggregateOperator(PhysicalOperator):
                     raise ValueError(f"Unknown operator in HAVING: {op}")
 
             elif isinstance(node, ColumnRef):
-                # For HAVING, we can reference aggregate results by alias or column name
-                # For now, assume we can evaluate against the result row
-                # This is simplified - in practice, HAVING can reference aggregates
                 col_name = node.name.lower()
-                # Try to find in original column names first
-                try:
-                    col_idx = self.column_names.index(col_name)
-                    return row[col_idx]
-                except ValueError:
-                    # Check if it's an aggregate result (by position)
-                    # This is a simplification - proper implementation would track aliases
-                    pass
+                if col_name in self._group_column_map:
+                    return row[self._group_column_map[col_name]]
+                if col_name in self._aggregate_alias_map:
+                    return row[self._aggregate_alias_map[col_name]]
                 raise ValueError(f"Unknown column in HAVING: {col_name}")
 
             elif isinstance(node, Literal):
                 return node.value
+
+            elif isinstance(node, AggregateFunction):
+                key = self._get_aggregate_key(node.func_name, node.column)
+                if node.alias and node.alias.lower() in self._aggregate_alias_map:
+                    return row[self._aggregate_alias_map[node.alias.lower()]]
+                if key in self._aggregate_function_map:
+                    return row[self._aggregate_function_map[key]]
+                raise ValueError(f"Aggregate {node.func_name}({node.column or '*'}) not found in HAVING context")
 
             else:
                 raise ValueError(f"Unknown node type in HAVING: {type(node)}")
@@ -921,13 +959,19 @@ class NestedLoopJoinOperator(PhysicalOperator):
                 
                 # Try to find in left columns
                 for i, left_col in enumerate(self.left_columns):
-                    if left_col.lower().endswith(col_name):
-                        return left_row[i]
+                    left_col_lower = left_col.lower()
+                    # Match either full qualified name or unqualified column name
+                    if left_col_lower == col_name or left_col_lower.endswith('.' + col_name):
+                        if i < len(left_row):
+                            return left_row[i]
                 
                 # Try to find in right columns
                 for i, right_col in enumerate(self.right_columns):
-                    if right_col.lower().endswith(col_name):
-                        return right_row[i]
+                    right_col_lower = right_col.lower()
+                    # Match either full qualified name or unqualified column name
+                    if right_col_lower == col_name or right_col_lower.endswith('.' + col_name):
+                        if i < len(right_row):
+                            return right_row[i]
                 
                 raise ValueError(f"Unknown column in join condition: {col_name}")
 

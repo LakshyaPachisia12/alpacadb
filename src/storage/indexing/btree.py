@@ -49,7 +49,8 @@ class BTreeNode:
             'is_leaf': self.is_leaf,
             'keys': self.keys,
             'values': self.values,
-            'children': self.children
+            'children': self.children,
+            'next_leaf_page_id': self.next_leaf_page_id
         })
     
     @staticmethod
@@ -60,6 +61,7 @@ class BTreeNode:
         node.keys = node_data['keys']
         node.values = node_data['values']
         node.children = node_data['children']
+        node.next_leaf_page_id = node_data.get('next_leaf_page_id')
         return node
 
 
@@ -100,12 +102,13 @@ class BTree:
         Returns:
             Page ID where the node is stored
         """
-        page = self.page_manager.allocate_page(page_type=2)  # INDEX type
+        page = self.page_manager.allocate_page(page_type=PAGE_TYPE_INDEX)
         serialized = node.serialize()
         page.records = [serialized]  # Store entire node as one record
         self.page_manager.write_page(page)
         # CACHE DISABLED: No cache updates
         # self._node_cache[page.page_id] = node
+        node.page_id = page.page_id
         return page.page_id
     
     def _read_node(self, page_id: int) -> Optional[BTreeNode]:
@@ -124,6 +127,7 @@ class BTree:
             return None
         
         node = BTreeNode.deserialize(page.records[0])
+        node.page_id = page_id
         return node
     
     def _update_node(self, page_id: int, node: BTreeNode) -> None:
@@ -267,6 +271,11 @@ class BTree:
         self._range_scan_node(root_node, min_key, max_key,
                              min_inclusive, max_inclusive, results)
         return results
+
+    def range_search(self, start_key: Optional[Any], end_key: Optional[Any],
+                     include_start: bool = True, include_end: bool = True) -> List[Tuple[int, int]]:
+        """Compatibility wrapper expected by range-scan tests."""
+        return self.range_scan(start_key, end_key, include_start, include_end)
     
     def _range_scan_node(self, node: BTreeNode, min_key: Optional[Any], max_key: Optional[Any],
                         min_inclusive: bool, max_inclusive: bool, results: List) -> None:
@@ -439,6 +448,8 @@ class BTree:
             child.keys = child.keys[:mid]
             new_node.values = child.values[mid:]
             child.values = child.values[:mid]
+            # Maintain leaf chain for efficient range scans
+            new_node.next_leaf_page_id = child.next_leaf_page_id
         else:
             # For internal nodes: median goes to parent, split children
             new_node.keys = child.keys[mid + 1:]
@@ -448,9 +459,11 @@ class BTree:
         
         # Write new sibling
         new_node_id = self._write_node(new_node)
-        
-        # Update child
-        self._update_node(child_id, child)
+        if child.is_leaf:
+            child.next_leaf_page_id = new_node_id
+            self._update_node(child_id, child)
+        else:
+            self._update_node(child_id, child)
         
         # Insert promoted key into parent
         parent.keys.insert(idx, promoted_key)
@@ -489,6 +502,10 @@ class BTree:
                 self.root_page_id = root.children[0]
         
         return success
+
+    def delete_entry(self, key: Any, value: Optional[Tuple[int, int]] = None) -> bool:
+        """Alias for delete() used by tests and IndexManager."""
+        return self.delete(key, value)
     
     def _delete_from_node(self, page_id: int, node: BTreeNode, key: Any, value: Optional[Tuple[int, int]]) -> bool:
         """
@@ -556,3 +573,20 @@ class BTree:
                 count += self._count_keys(child_id)
         
         return count
+
+    # ============ Utility helpers for tests / advanced scans ============
+
+    def _find_leftmost_leaf(self) -> Optional[BTreeNode]:
+        """Return the left-most leaf node (used for range scan validation)."""
+        if self.root_page_id is None:
+            return None
+        node = self._read_node(self.root_page_id)
+        while node and not node.is_leaf:
+            if not node.children:
+                break
+            node = self._read_node(node.children[0])
+        return node
+
+    def _load_node(self, page_id: int) -> Optional[BTreeNode]:
+        """Expose node loading for tests traversing leaf links."""
+        return self._read_node(page_id)
