@@ -10,9 +10,9 @@ from .tokens import Token, TokenType
 from .ast_nodes import *
 
 
-class ParseError(Exception):
-    """Raised when parser encounters syntax error."""
-    pass
+# Keep old ParseError for backward compatibility but import from errors
+from ..errors import ParserError, SyntaxError as AlpacaSyntaxError
+ParseError = ParserError  # Alias for backward compatibility
 
 
 class Parser:
@@ -54,14 +54,16 @@ class Parser:
         """
         try:
             return self._statement()
-        except ParseError as e:
+        except (ParserError, AlpacaSyntaxError) as e:
             raise e
         except Exception as e:
             current_token = self._peek()
-            raise ParseError(
-                f"Unexpected error at line {current_token.line}, "
-                f"column {current_token.column}: {e}"
-            )
+            raise ParserError(
+                f"Unexpected error at line {current_token.line}, column {current_token.column}",
+                hint="This may be a syntax error. Check your query syntax carefully.",
+                token=current_token.lexeme if current_token else None,
+                context=f"Line {current_token.line}, Column {current_token.column}"
+            ) from e
     
     def _statement(self) -> ASTNode:
         """
@@ -78,6 +80,14 @@ class Parser:
         elif self._check(TokenType.DROP):
             self._consume(TokenType.DROP)
             return self._drop_statement()
+        
+        # EXPLAIN statement
+        elif self._check(TokenType.EXPLAIN):
+            self._consume(TokenType.EXPLAIN)
+            self._consume(TokenType.SELECT)
+            select_node = self._select_statement()
+            select_node.is_explain = True
+            return select_node
             
         # DML statements
         elif self._check(TokenType.SELECT):
@@ -105,10 +115,11 @@ class Parser:
             return TransactionNode('ROLLBACK')
         
         else:
-            raise ParseError(
-                f"Unexpected token '{token.lexeme}' at line {token.line}, "
-                f"column {token.column}. Expected statement keyword "
-                f"(CREATE, SELECT, INSERT, etc.)"
+            raise AlpacaSyntaxError(
+                f"Unexpected token '{token.lexeme}' at line {token.line}, column {token.column}",
+                hint="Expected a statement keyword (CREATE, SELECT, INSERT, UPDATE, DELETE, DROP, BEGIN, COMMIT, ROLLBACK).",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
             )
         
     def _create_statement(self) -> ASTNode:
@@ -121,7 +132,12 @@ class Parser:
         elif next_token.type == TokenType.INDEX:
             return self._create_index_statement()
         else:
-            raise ParseError("Expected 'TABLE' or 'INDEX' after CREATE")
+            raise AlpacaSyntaxError(
+                f"Expected 'TABLE' or 'INDEX' after CREATE, but got '{next_token.lexeme}'",
+                hint="CREATE statement must be followed by TABLE or INDEX. Example: CREATE TABLE users ... or CREATE INDEX idx_name ...",
+                token=next_token.lexeme,
+                context=f"Line {next_token.line}, Column {next_token.column}"
+            )
             
     def _create_index_statement(self) -> CreateIndexNode:
         """Parse CREATE INDEX statement."""
@@ -153,7 +169,12 @@ class Parser:
         elif next_token.type == TokenType.INDEX:
             return self._drop_index_statement()
         else:
-            raise ParseError("Expected 'TABLE' or 'INDEX' after DROP")
+            raise AlpacaSyntaxError(
+                f"Expected 'TABLE' or 'INDEX' after DROP, but got '{next_token.lexeme}'",
+                hint="DROP statement must be followed by TABLE or INDEX. Example: DROP TABLE users or DROP INDEX idx_name ...",
+                token=next_token.lexeme,
+                context=f"Line {next_token.line}, Column {next_token.column}"
+            )
             
     def _drop_index_statement(self) -> DropIndexNode:
         """Parse DROP INDEX statement."""
@@ -206,7 +227,12 @@ class Parser:
         # Validate: Only one PRIMARY KEY allowed
         primary_key_count = sum(1 for col in columns if col.is_primary_key)
         if primary_key_count > 1:
-            raise ParseError(f"Table '{table_name}' cannot have multiple PRIMARY KEY columns")
+            raise AlpacaSyntaxError(
+                f"Table '{table_name}' cannot have multiple PRIMARY KEY columns",
+                hint="A table can only have one PRIMARY KEY. Remove extra PRIMARY KEY constraints or use a composite key.",
+                token="PRIMARY KEY",
+                context=f"Table: {table_name}"
+            )
         
         return CreateTableNode(table_name, columns)
     
@@ -237,8 +263,12 @@ class Parser:
             data_type = 'BOOLEAN'
             self._consume(TokenType.BOOLEAN)
         else:
-            raise ParseError(
-                f"Expected data type (INT, STRING, BOOLEAN) at line {self._peek().line}"
+            token = self._peek()
+            raise AlpacaSyntaxError(
+                f"Expected data type (INT, STRING, BOOLEAN) at line {token.line}, but got '{token.lexeme}'",
+                hint="Column definitions require a data type after the column name. Valid types: INT, STRING, BOOLEAN.",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
             )
         
         # Optional constraints
@@ -348,35 +378,62 @@ class Parser:
     
     def _select_statement(self) -> SelectNode:
         """
-        Parse: SELECT columns FROM table [WHERE condition] [ORDER BY column]
+        Parse: SELECT columns FROM table [WHERE condition] [GROUP BY cols] [HAVING condition] [ORDER BY column]
         
         Examples:
             SELECT * FROM users
-            SELECT id, name FROM users WHERE age > 18
-            SELECT * FROM users ORDER BY name ASC
+            SELECT COUNT(*), department FROM employees GROUP BY department
+            SELECT department, AVG(salary) FROM employees GROUP BY department HAVING AVG(salary) > 50000
         """
         # SELECT token already consumed by _statement()
         
-        # Columns (* or col1, col2, ...)
+        # Columns (* or col1, col2, ... or aggregate functions)
         columns = []
+        aggregates = []
+        
         if self._check(TokenType.STAR):
             self._consume(TokenType.STAR)
             columns = ['*']
         else:
             while True:
-                col_token = self._consume(TokenType.IDENTIFIER)
-                columns.append(col_token.value)
+                # Check if it's an aggregate function
+                if self._check_aggregate_function():
+                    agg_func = self._parse_aggregate_function()
+                    aggregates.append(agg_func)
+                    # Also add to columns for backward compatibility
+                    columns.append(str(agg_func))
+                else:
+                    col_token = self._consume(TokenType.IDENTIFIER)
+                    columns.append(col_token.value)
                 
                 if not self._check(TokenType.COMMA):
                     break
                 self._consume(TokenType.COMMA)
         
-        # FROM keyword
-        self._consume(TokenType.FROM)
+        # FROM keyword (required)
+        try:
+            self._consume(TokenType.FROM)
+        except (ParserError, AlpacaSyntaxError):
+            token = self._peek()
+            raise AlpacaSyntaxError(
+                f"Expected 'FROM' keyword at line {token.line}, column {token.column}, but got '{token.lexeme}'",
+                hint="SELECT statement must include a FROM clause. Example: SELECT * FROM table_name",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
+            )
         
         # Table name
-        table_name_token = self._consume(TokenType.IDENTIFIER)
-        table_name = table_name_token.value
+        try:
+            table_name_token = self._consume(TokenType.IDENTIFIER)
+            table_name = table_name_token.value
+        except (ParserError, AlpacaSyntaxError):
+            token = self._peek()
+            raise AlpacaSyntaxError(
+                f"Expected table name after FROM at line {token.line}, column {token.column}, but got '{token.lexeme}'",
+                hint="After FROM, specify the table name. Example: SELECT * FROM users",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
+            )
         
         # Optional WHERE clause
         where_clause = None
@@ -388,6 +445,11 @@ class Parser:
         join_clause = None
         if self._check(TokenType.INNER) or self._check(TokenType.JOIN):
             join_clause = self._join_clause()
+        
+        # Optional GROUP BY clause
+        group_by = None
+        if self._check(TokenType.GROUP):
+            group_by = self._parse_group_by_clause()
         
         # Optional ORDER BY clause
         order_by = None
@@ -407,7 +469,7 @@ class Parser:
         if self._check(TokenType.SEMICOLON):
             self._consume(TokenType.SEMICOLON)
         
-        return SelectNode(columns, table_name, where_clause, order_by, join_clause)
+        return SelectNode(columns, table_name, where_clause, group_by, order_by, join_clause, aggregates)
     
     def _update_statement(self) -> UpdateNode:
         """
@@ -503,6 +565,95 @@ class Parser:
         
         return JoinClause('INNER', table_name, condition)
     
+    def _parse_aggregate_function(self) -> AggregateFunction:
+        """
+        Parse aggregate function: COUNT(*), SUM(column), etc.
+        
+        Examples:
+            COUNT(*)
+            SUM(salary)
+            AVG(age) AS average_age
+        """
+        # Consume the function name token
+        func_token = self._consume_aggregate_function()
+        func_name = func_token.value.upper()
+        
+        self._consume(TokenType.LEFT_PAREN)
+        
+        column = None
+        if not self._check(TokenType.STAR):
+            col_token = self._consume(TokenType.IDENTIFIER)
+            column = col_token.value
+        else:
+            self._consume(TokenType.STAR)
+        
+        self._consume(TokenType.RIGHT_PAREN)
+        
+        # Optional AS alias
+        alias = None
+        if self._check(TokenType.IDENTIFIER) and self._peek().value.upper() == 'AS':
+            self._consume(TokenType.IDENTIFIER)  # consume 'AS'
+            alias_token = self._consume(TokenType.IDENTIFIER)
+            alias = alias_token.value
+        
+        return AggregateFunction(func_name, column, alias)
+    
+    def _parse_group_by_clause(self) -> GroupByNode:
+        """
+        Parse GROUP BY clause with optional HAVING.
+        
+        Examples:
+            GROUP BY department
+            GROUP BY department, city HAVING COUNT(*) > 5
+        """
+        self._consume(TokenType.GROUP)
+        self._consume(TokenType.BY)
+        
+        # Group columns
+        columns = []
+        while True:
+            col_token = self._consume(TokenType.IDENTIFIER)
+            columns.append(col_token.value)
+            
+            if not self._check(TokenType.COMMA):
+                break
+            self._consume(TokenType.COMMA)
+        
+        # Optional HAVING clause
+        having_clause = None
+        if self._check(TokenType.HAVING):
+            self._consume(TokenType.HAVING)
+            having_clause = self._expression()
+        
+        return GroupByNode(columns, having_clause)
+    
+    def _consume_aggregate_function(self) -> Token:
+        """Consume and return an aggregate function token."""
+        if self._check(TokenType.COUNT):
+            return self._consume(TokenType.COUNT)
+        elif self._check(TokenType.SUM):
+            return self._consume(TokenType.SUM)
+        elif self._check(TokenType.AVG):
+            return self._consume(TokenType.AVG)
+        elif self._check(TokenType.MIN):
+            return self._consume(TokenType.MIN)
+        elif self._check(TokenType.MAX):
+            return self._consume(TokenType.MAX)
+        else:
+            token = self._peek()
+            raise AlpacaSyntaxError(
+                f"Expected aggregate function (COUNT, SUM, AVG, MIN, MAX) at line {token.line}, but got '{token.lexeme}'",
+                hint="Aggregate functions must be: COUNT, SUM, AVG, MIN, or MAX. Example: COUNT(*) or AVG(salary)",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
+            )
+    
+    def _check_aggregate_function(self) -> bool:
+        """Check if current token is an aggregate function."""
+        return self._check(TokenType.COUNT) or self._check(TokenType.SUM) or \
+               self._check(TokenType.AVG) or self._check(TokenType.MIN) or \
+               self._check(TokenType.MAX)
+    
     # ==================== Expression Parsing ====================
     
     def _expression(self) -> BinaryOp:
@@ -549,7 +700,13 @@ class Parser:
         """
         # Left side (column reference)
         if not self._check(TokenType.IDENTIFIER):
-            raise ParseError(f"Expected column name at line {self._peek().line}")
+            token = self._peek()
+            raise AlpacaSyntaxError(
+                f"Expected column name at line {token.line}, column {token.column}, but got '{token.lexeme}'",
+                hint="Comparison operations require a column name on the left side. Example: age > 25",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
+            )
         
         left_token = self._consume(TokenType.IDENTIFIER)
         left = ColumnRef(left_token.value)
@@ -569,8 +726,11 @@ class Parser:
                 TokenType.GREATER_EQUAL: '>='
             }[op_token.type]
         else:
-            raise ParseError(
-                f"Expected comparison operator (=, !=, <, >, <=, >=) at line {op_token.line}"
+            raise AlpacaSyntaxError(
+                f"Expected comparison operator (=, !=, <, >, <=, >=) at line {op_token.line}, column {op_token.column}, but got '{op_token.lexeme}'",
+                hint="Valid comparison operators are: = (equal), != (not equal), < (less), > (greater), <= (less or equal), >= (greater or equal). Example: age > 25",
+                token=op_token.lexeme,
+                context=f"Line {op_token.line}, Column {op_token.column}"
             )
         
         # Right side (literal value)
@@ -599,8 +759,11 @@ class Parser:
             self._advance()
             return None
         else:
-            raise ParseError(
-                f"Expected literal value at line {token.line}, got '{token.lexeme}'"
+            raise AlpacaSyntaxError(
+                f"Expected literal value (number, string, boolean, NULL) at line {token.line}, column {token.column}, but got '{token.lexeme}'",
+                hint="Literal values can be: numbers (25), strings ('text'), booleans (TRUE/FALSE), or NULL. Example: WHERE age = 25",
+                token=token.lexeme,
+                context=f"Line {token.line}, Column {token.column}"
             )
     
     # ==================== Helper Methods ====================
@@ -621,9 +784,11 @@ class Parser:
             return self._advance()
         
         current = self._peek()
-        raise ParseError(
-            f"Expected {token_type.name} at line {current.line}, column {current.column}, "
-            f"but got {current.type.name} ('{current.lexeme}')"
+        raise AlpacaSyntaxError(
+            f"Expected {token_type.name} at line {current.line}, column {current.column}, but got {current.type.name} ('{current.lexeme}')",
+            hint=f"Expected {token_type.name} token here. Check your syntax.",
+            token=current.lexeme,
+            context=f"Line {current.line}, Column {current.column}"
         )
     
     def _advance(self) -> Token:

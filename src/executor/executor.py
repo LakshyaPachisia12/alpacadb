@@ -5,7 +5,7 @@ Converts AST nodes into physical operator trees and executes them.
 """
 
 from typing import List, Any, Optional, Tuple
-from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator
+from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator
 from ..query.ast_nodes import (
     SelectNode,
     InsertNode,
@@ -14,6 +14,14 @@ from ..query.ast_nodes import (
     DropIndexNode,
     UpdateNode,
     DeleteNode,
+)
+from ..errors import (
+    ExecutionError,
+    TableNotFoundError,
+    ColumnNotFoundError,
+    InvalidSchemaError,
+    DuplicateTableError,
+    IndexNotFoundError,
 )
 from ..optimizer import QueryOptimizer
 
@@ -27,7 +35,7 @@ class QueryExecutor:
         self.table_manager = table_manager
         self.catalog = catalog
         self.index_manager = index_manager
-        self.optimizer = QueryOptimizer(catalog, index_manager) if index_manager else None
+        self.optimizer = QueryOptimizer(catalog, index_manager, table_manager) if index_manager else None
         self.last_plan = None  # For debugging/testing - stores last query plan type
 
     def execute(self, ast_node) -> Tuple[List[List[Any]], Optional[List[str]]]:
@@ -53,7 +61,10 @@ class QueryExecutor:
         elif isinstance(ast_node, DeleteNode):
             return self._execute_delete(ast_node)
         else:
-            raise ValueError(f"Unknown AST node type: {type(ast_node)}")
+            raise ExecutionError(
+                f"Unknown AST node type: {type(ast_node).__name__}",
+                hint="This query type is not supported. Supported types: SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, CREATE INDEX, DROP INDEX."
+            )
 
     def _execute_select(self, node: SelectNode) -> Tuple[List[List[Any]], List[str]]:
         """
@@ -68,10 +79,21 @@ class QueryExecutor:
                 ↓
             IndexScanOperator OR ScanOperator (FROM table - chosen by optimizer)
         """
+        # Handle EXPLAIN query
+        if hasattr(node, 'is_explain') and node.is_explain:
+            if self.optimizer:
+                plan = self.optimizer.optimize(node)
+                explanation = self.optimizer.explain(plan)
+                cost = self.optimizer.estimate_cost(plan)
+                # Return explanation as a single row with one column
+                return [[explanation + f"\n\n💰 Estimated Cost: {cost:.2f}"]], ['Query Plan']
+            else:
+                return [["Optimizer not available"]], ['Query Plan']
+        
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:
-            raise ValueError(f"Table '{node.table_name}' does not exist")
+            raise TableNotFoundError(node.table_name)
 
         # Extract column names from schema
         all_column_names = [col['name'].lower() for col in table_schema.columns]
@@ -122,7 +144,24 @@ class QueryExecutor:
                 column_names=all_column_names,
             )
 
-        # 3. Sort Operator (ORDER BY clause)
+        # 3. Aggregate Operator (GROUP BY and aggregate functions)
+        if node.aggregates or node.group_by:
+            group_by_columns = []
+            having_predicate = None
+            
+            if node.group_by:
+                group_by_columns = node.group_by.columns
+                having_predicate = node.group_by.having_clause
+            
+            current_operator = AggregateOperator(
+                child=current_operator,
+                aggregates=node.aggregates,
+                group_by_columns=group_by_columns,
+                having_predicate=having_predicate,
+                column_names=all_column_names,
+            )
+
+        # 4. Sort Operator (ORDER BY clause)
         if node.order_by:
             # Convert order_by to list of (column, is_desc) tuples
             order_by_list = []
@@ -144,23 +183,40 @@ class QueryExecutor:
                 column_names=all_column_names,
             )
 
-        # 4. Project Operator (SELECT columns) - always at the top
-        projection_columns = node.columns if node.columns else ["*"]
-
-        current_operator = ProjectOperator(
-            child=current_operator,
-            projection_columns=projection_columns,
-            input_columns=all_column_names,
-        )
+        # 4. Project Operator (SELECT columns) - skip if we have aggregates
+        if node.aggregates or node.group_by:
+            # For aggregates, the AggregateOperator produces the final schema
+            # No projection needed
+            pass
+        else:
+            # Normal projection for non-aggregate queries
+            projection_columns = node.columns if node.columns else ["*"]
+            current_operator = ProjectOperator(
+                child=current_operator,
+                projection_columns=projection_columns,
+                input_columns=all_column_names,
+            )
 
         # Execute the operator tree
         results = current_operator.execute()
 
         # Determine output column names
-        if "*" in projection_columns:
+        if node.aggregates or node.group_by:
+            # For aggregate queries, output columns are group-by columns + aggregate results
+            output_columns = []
+            if node.group_by:
+                output_columns.extend(node.group_by.columns)
+            # Add aggregate column names (use aliases if available, otherwise generated names)
+            for agg in node.aggregates:
+                if agg.alias:
+                    output_columns.append(agg.alias)
+                else:
+                    col_name = agg.column if agg.column else '*'
+                    output_columns.append(f"{agg.func_name}({col_name})")
+        elif "*" in (node.columns or ["*"]):
             output_columns = all_column_names
         else:
-            output_columns = [col.lower() for col in projection_columns]
+            output_columns = [col.lower() for col in (node.columns or [])]
 
         return results, output_columns
 
@@ -208,7 +264,7 @@ class QueryExecutor:
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:
-            raise ValueError(f"Table '{node.table_name}' does not exist")
+            raise TableNotFoundError(node.table_name)
 
         all_column_names = [col['name'].lower() for col in table_schema.columns]
 
@@ -236,15 +292,21 @@ class QueryExecutor:
                 if filter_op._evaluate_predicate(row):
                     # Apply updates
                     for col_name, new_value in node.assignments:
-                        col_idx = all_column_names.index(col_name.lower())
-                        row[col_idx] = new_value
+                        try:
+                            col_idx = all_column_names.index(col_name.lower())
+                            row[col_idx] = new_value
+                        except ValueError:
+                            raise ColumnNotFoundError(col_name, node.table_name)
                     updated_count += 1
         else:
             # No WHERE clause - update all rows
             for row in all_rows:
                 for col_name, new_value in node.assignments:
-                    col_idx = all_column_names.index(col_name.lower())
-                    row[col_idx] = new_value
+                    try:
+                        col_idx = all_column_names.index(col_name.lower())
+                        row[col_idx] = new_value
+                    except ValueError:
+                        raise ColumnNotFoundError(col_name, node.table_name)
                 updated_count += 1
 
         # Clear table and re-insert (simple approach)
@@ -274,7 +336,7 @@ class QueryExecutor:
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:
-            raise ValueError(f"Table '{node.table_name}' does not exist")
+            raise TableNotFoundError(node.table_name)
 
         all_column_names = [col['name'].lower() for col in table_schema.columns]
 
@@ -324,7 +386,10 @@ class QueryExecutor:
     def _execute_create_index(self, node: CreateIndexNode) -> Tuple[List[List[Any]], None]:
         """Execute CREATE INDEX statement."""
         if not self.index_manager:
-            raise ValueError("Index manager not available")
+            raise ExecutionError(
+                "Index manager is not available",
+                hint="Indexes require the index manager to be initialized. This may be a configuration issue."
+            )
         
         self.index_manager.create_index(node.index_name, node.table_name, node.column_name)
         return [], None
@@ -332,7 +397,10 @@ class QueryExecutor:
     def _execute_drop_index(self, node: DropIndexNode) -> Tuple[List[List[Any]], None]:
         """Execute DROP INDEX statement."""
         if not self.index_manager:
-            raise ValueError("Index manager not available")
+            raise ExecutionError(
+                "Index manager is not available",
+                hint="Dropping indexes requires the index manager to be initialized. This may be a configuration issue."
+            )
         
         self.index_manager.drop_index(node.index_name, node.table_name)
         return [], None

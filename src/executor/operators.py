@@ -9,6 +9,7 @@ These operators use the Volcano/Iterator model:
 
 from typing import List, Optional, Any, Iterator
 from abc import ABC, abstractmethod
+from ..errors import ExecutionError, ColumnNotFoundError
 
 
 class ReverseCompare:
@@ -102,6 +103,9 @@ class ScanOperator(PhysicalOperator):
     def next(self) -> Optional[List[Any]]:
         if not self._opened:
             raise RuntimeError("Operator not opened")
+        
+        if self._iterator is None:
+            return None
 
         try:
             return next(self._iterator)
@@ -179,7 +183,10 @@ class FilterOperator(PhysicalOperator):
                 elif op == "OR":
                     return left or right
                 else:
-                    raise ValueError(f"Unknown operator: {op}")
+                    raise ExecutionError(
+                        f"Unknown operator: {op}",
+                        hint=f"Supported operators: =, !=, <, >, <=, >=, AND, OR. Got: {op}"
+                    )
 
             elif isinstance(node, ColumnRef):
                 # Find column index and return value from row
@@ -188,13 +195,20 @@ class FilterOperator(PhysicalOperator):
                     col_idx = self.column_names.index(col_name)
                     return row[col_idx]
                 except ValueError:
-                    raise ValueError(f"Unknown column: {col_name}")
+                    # Find table name if available (for better error message)
+                    raise ColumnNotFoundError(
+                        col_name,
+                        hint=f"Column '{col_name}' not found in table. Available columns: {', '.join(self.column_names)}"
+                    )
 
             elif isinstance(node, Literal):
                 return node.value
 
             else:
-                raise ValueError(f"Unknown node type in predicate: {type(node)}")
+                raise ExecutionError(
+                    f"Unknown node type in predicate: {type(node).__name__}",
+                    hint="Predicates can only contain column references, literals, and binary operations."
+                )
 
         return evaluate(self.predicate)
 
@@ -234,7 +248,10 @@ class ProjectOperator(PhysicalOperator):
                     idx = input_columns.index(col_lower)
                     self.column_indices.append(idx)
                 except ValueError:
-                    raise ValueError(f"Unknown column: {col}")
+                    raise ColumnNotFoundError(
+                        col,
+                        hint=f"Column '{col}' not found. Available columns: {', '.join(input_columns)}"
+                    )
 
     def open(self):
         super().open()
@@ -304,7 +321,7 @@ class SortOperator(PhysicalOperator):
 
         # Build sort key function with proper DESC handling
         def sort_key(row):
-            keys = []
+            keys: List[Any] = []
             for col_name, is_desc in self.order_by_columns:
                 col_idx = self.column_names.index(col_name.lower())
                 value = row[col_idx]
@@ -337,6 +354,9 @@ class SortOperator(PhysicalOperator):
     def next(self) -> Optional[List[Any]]:
         if not self._opened:
             raise RuntimeError("Operator not opened")
+        
+        if self._iterator is None:
+            return None
 
         try:
             return next(self._iterator)
@@ -420,3 +440,208 @@ class IndexScanOperator(PhysicalOperator):
 
     def __repr__(self):
         return f"IndexScanOperator(index={self.index_name}, key={self.key})"
+
+
+class AggregateOperator(PhysicalOperator):
+    """
+    Aggregation Operator
+    Groups rows by specified columns and applies aggregate functions.
+    
+    Handles GROUP BY and aggregate functions like COUNT, SUM, AVG, MIN, MAX.
+    """
+
+    def __init__(self, child: PhysicalOperator, aggregates: List, group_by_columns: Optional[List[str]] = None, 
+                 having_predicate=None, column_names: Optional[List[str]] = None):
+        super().__init__()
+        self.child = child
+        self.aggregates = aggregates  # List of AggregateFunction AST nodes
+        self.group_by_columns = group_by_columns if group_by_columns is not None else []  # Column names to group by
+        self.having_predicate = having_predicate  # HAVING condition
+        self.column_names = column_names if column_names is not None else []  # For evaluating HAVING predicates
+        self._results = []
+        self._current_idx = 0
+
+    def open(self):
+        super().open()
+        self.child.open()
+        
+        # Collect all rows from child
+        all_rows = []
+        while True:
+            row = self.child.next()
+            if row is None:
+                break
+            all_rows.append(row)
+        
+        self.child.close()
+        
+        # Perform aggregation
+        self._results = self._perform_aggregation(all_rows)
+        self._current_idx = 0
+
+    def next(self) -> Optional[List[Any]]:
+        if not self._opened:
+            raise RuntimeError("Operator not opened")
+        
+        if self._current_idx >= len(self._results):
+            return None
+        
+        row = self._results[self._current_idx]
+        self._current_idx += 1
+        return row
+
+    def close(self):
+        super().close()
+        self._results = []
+        self._current_idx = 0
+
+    def _perform_aggregation(self, rows: List[List[Any]]) -> List[List[Any]]:
+        """Perform grouping and aggregation on the rows."""
+        if not self.aggregates and not self.group_by_columns:
+            # No aggregation, just pass through (shouldn't happen in practice)
+            return rows
+        
+        # If no GROUP BY, treat all rows as one group
+        if not self.group_by_columns:
+            groups = {(): rows}
+        else:
+            # Group rows by GROUP BY columns
+            groups = {}
+            group_indices = []
+            for col_name in self.group_by_columns:
+                try:
+                    idx = self.column_names.index(col_name.lower())
+                    group_indices.append(idx)
+                except ValueError:
+                    raise ColumnNotFoundError(
+                        col_name,
+                        hint=f"Column '{col_name}' in GROUP BY not found. Available columns: {', '.join(self.column_names)}"
+                    )
+            
+            for row in rows:
+                key = tuple(row[i] for i in group_indices)
+                if key not in groups:
+                    groups[key] = []
+                groups[key].append(row)
+        
+        # Apply aggregates to each group
+        results = []
+        for group_key, group_rows in groups.items():
+            result_row: List[Any] = list(group_key)  # Start with GROUP BY columns
+            
+            # Apply each aggregate function
+            for agg in self.aggregates:
+                if agg.func_name == 'COUNT':
+                    if agg.column is None:  # COUNT(*)
+                        value = len(group_rows)
+                    else:
+                        # COUNT(column) - count non-null values
+                        col_idx = self.column_names.index(agg.column.lower())
+                        value = sum(1 for row in group_rows if row[col_idx] is not None)
+                elif agg.func_name == 'SUM':
+                    col_idx = self.column_names.index(agg.column.lower())
+                    values = [row[col_idx] for row in group_rows if row[col_idx] is not None]
+                    value = sum(values) if values else 0
+                elif agg.func_name == 'AVG':
+                    col_idx = self.column_names.index(agg.column.lower())
+                    values = [row[col_idx] for row in group_rows if row[col_idx] is not None]
+                    value = sum(values) / len(values) if values else 0
+                elif agg.func_name == 'MIN':
+                    col_idx = self.column_names.index(agg.column.lower())
+                    values = [row[col_idx] for row in group_rows if row[col_idx] is not None]
+                    value = min(values) if values else None
+                elif agg.func_name == 'MAX':
+                    col_idx = self.column_names.index(agg.column.lower())
+                    values = [row[col_idx] for row in group_rows if row[col_idx] is not None]
+                    value = max(values) if values else None
+                else:
+                    raise ExecutionError(
+                        f"Unknown aggregate function: {agg.func_name}",
+                        hint="Supported aggregate functions: COUNT, SUM, AVG, MIN, MAX."
+                    )
+                
+                result_row.append(value)
+            
+            results.append(result_row)
+        
+        # Apply HAVING filter if present
+        if self.having_predicate:
+            filtered_results = []
+            for result_row in results:
+                if self._evaluate_having(result_row):
+                    filtered_results.append(result_row)
+            results = filtered_results
+        
+        return results
+
+    def _evaluate_having(self, row: List[Any]) -> bool:
+        """Evaluate HAVING predicate on an aggregated row."""
+        if self.having_predicate is None:
+            return True
+
+        # Import here to avoid circular dependency
+        from ..query.ast_nodes import BinaryOp, ColumnRef, Literal
+
+        def evaluate(node):
+            if isinstance(node, BinaryOp):
+                left = evaluate(node.left)
+                right = evaluate(node.right)
+
+                op = node.operator.upper()
+                if op == "=":
+                    return left == right
+                elif op == "!=":
+                    return left != right
+                elif op == "<>":
+                    return left != right
+                elif op == "<":
+                    return left < right
+                elif op == ">":
+                    return left > right
+                elif op == "<=":
+                    return left <= right
+                elif op == ">=":
+                    return left >= right
+                elif op == "AND":
+                    return left and right
+                elif op == "OR":
+                    return left or right
+                else:
+                    raise ExecutionError(
+                        f"Unknown operator in HAVING clause: {op}",
+                        hint=f"Supported operators: =, !=, <, >, <=, >=, AND, OR. Got: {op}"
+                    )
+
+            elif isinstance(node, ColumnRef):
+                # For HAVING, we can reference aggregate results by alias or column name
+                # For now, assume we can evaluate against the result row
+                # This is simplified - in practice, HAVING can reference aggregates
+                col_name = node.name.lower()
+                # Try to find in original column names first
+                try:
+                    col_idx = self.column_names.index(col_name)
+                    return row[col_idx]
+                except ValueError:
+                    # Check if it's an aggregate result (by position)
+                    # This is a simplification - proper implementation would track aliases
+                    pass
+                raise ColumnNotFoundError(
+                    col_name,
+                    hint=f"Column '{col_name}' in HAVING clause not found. Use aggregate functions or GROUP BY columns."
+                )
+
+            elif isinstance(node, Literal):
+                return node.value
+
+            else:
+                raise ExecutionError(
+                    f"Unknown node type in HAVING clause: {type(node).__name__}",
+                    hint="HAVING clauses can only contain column references, literals, and binary operations."
+                )
+
+        return evaluate(self.having_predicate)
+
+    def __repr__(self):
+        agg_names = [f"{a.func_name}({a.column or '*'})" for a in self.aggregates]
+        group_cols = ', '.join(self.group_by_columns) if self.group_by_columns else 'None'
+        return f"AggregateOperator(aggregates=[{', '.join(agg_names)}], group_by=[{group_cols}])"

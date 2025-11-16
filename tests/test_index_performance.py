@@ -77,6 +77,8 @@ class IndexPerformanceTester:
         """Insert large number of rows into the database."""
         print(f"\n📊 Inserting {num_rows:,} rows...")
         
+        assert self.table_manager is not None, "table_manager not initialized"
+        
         start_time = time.time()
         
         for i in range(num_rows):
@@ -106,6 +108,8 @@ class IndexPerformanceTester:
         """Test index creation time on large dataset."""
         print("\n🔍 Testing index creation performance...")
         
+        assert self.index_manager is not None, "index_manager not initialized"
+        
         start_time = time.time()
         self.index_manager.create_index('idx_email', 'users', 'email')
         elapsed = time.time() - start_time
@@ -126,6 +130,10 @@ class IndexPerformanceTester:
         Returns:
             Row as list of values, or None if not found
         """
+        assert self.catalog is not None, "catalog not initialized"
+        assert self.page_manager is not None, "page_manager not initialized"
+        assert self.table_manager is not None, "table_manager not initialized"
+        
         schema = self.catalog.get_table_schema(table_name)
         if not schema:
             return None
@@ -145,6 +153,10 @@ class IndexPerformanceTester:
     def test_query_without_index(self, num_queries=100):
         """Test query performance WITHOUT index (full table scan)."""
         print(f"\n🔍 Testing {num_queries} queries WITHOUT index (baseline)...")
+        
+        assert self.catalog is not None, "catalog not initialized"
+        assert self.table_manager is not None, "table_manager not initialized"
+        assert self.index_manager is not None, "index_manager not initialized"
         
         # Drop index if exists
         index = self.catalog.get_index('idx_email')
@@ -182,6 +194,8 @@ class IndexPerformanceTester:
     def test_query_with_index(self, num_queries=100):
         """Test query performance WITH index."""
         print(f"\n🔍 Testing {num_queries} queries WITH index...")
+        
+        assert self.index_manager is not None, "index_manager not initialized"
         
         # Create index
         self.index_manager.create_index('idx_email', 'users', 'email')
