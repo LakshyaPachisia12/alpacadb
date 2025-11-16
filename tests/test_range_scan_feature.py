@@ -59,7 +59,9 @@ def catalog(page_manager):
 @pytest.fixture
 def table_manager(page_manager, catalog, index_manager):
     """Create a table manager instance."""
-    return TableManager(page_manager, catalog, index_manager)
+    tm = TableManager(page_manager, catalog)
+    tm.index_manager = index_manager
+    return tm
 
 
 @pytest.fixture
@@ -71,8 +73,25 @@ def index_manager(catalog, page_manager):
 @pytest.fixture
 def executor(catalog, table_manager, index_manager):
     """Create an executor with optimizer."""
-    optimizer = QueryOptimizer(catalog, index_manager)
-    return QueryExecutor(table_manager, catalog, index_manager, optimizer)
+    from src.query.lexer import Lexer
+    from src.query.parser import Parser
+    
+    class ExecutorWrapper:
+        def __init__(self, table_manager, catalog, index_manager):
+            self.executor = QueryExecutor(table_manager, catalog, index_manager)
+            
+        def execute(self, sql):
+            lexer = Lexer(sql)
+            tokens = lexer.tokenize()
+            parser = Parser(tokens)
+            ast = parser.parse()
+            return self.executor.execute(ast)
+            
+        @property
+        def last_plan(self):
+            return self.executor.last_plan
+    
+    return ExecutorWrapper(table_manager, catalog, index_manager)
 
 
 class TestBTreeRangeScan:
@@ -185,10 +204,10 @@ class TestIndexManagerRangeScan:
         
         # Insert data
         for i in range(1, 11):
-            table_manager.insert("users", [i, i * 10])
+            table_manager.insert_row("users", [i, i * 10])
         
         # Create index on age
-        index_manager.create_index("users", "age", "age_idx")
+        index_manager.create_index("age_idx", "users", "age", table_manager)
         
         # Range scan [30, 70]
         results = index_manager.range_scan_index(
@@ -211,13 +230,14 @@ class TestOptimizerRangeDetection:
             {"name": "id", "type": "int", "nullable": False},
             {"name": "price", "type": "int", "nullable": False},
         ])
-        index_manager.create_index("products", "price", "price_idx")
+        index_manager.create_index("price_idx", "products", "price")
         
         # Parse query with >
-        lexer = Lexer()
-        parser = Parser()
-        tokens = lexer.tokenize("SELECT * FROM products WHERE price > 100")
-        ast = parser.parse(tokens)
+        query = "SELECT * FROM products WHERE price > 100"
+        lexer = Lexer(query)
+        tokens = lexer.tokenize()
+        parser = Parser(tokens)
+        ast = parser.parse()
         
         # Optimize
         optimizer = QueryOptimizer(catalog, index_manager)
@@ -234,12 +254,13 @@ class TestOptimizerRangeDetection:
             {"name": "id", "type": "int", "nullable": False},
             {"name": "price", "type": "int", "nullable": False},
         ])
-        index_manager.create_index("products", "price", "price_idx")
+        index_manager.create_index("price_idx", "products", "price")
         
-        lexer = Lexer()
-        parser = Parser()
-        tokens = lexer.tokenize("SELECT * FROM products WHERE price <= 500")
-        ast = parser.parse(tokens)
+        query = "SELECT * FROM products WHERE price <= 500"
+        lexer = Lexer(query)
+        tokens = lexer.tokenize()
+        parser = Parser(tokens)
+        ast = parser.parse()
         
         optimizer = QueryOptimizer(catalog, index_manager)
         plan = optimizer.optimize(ast)
@@ -263,20 +284,20 @@ class TestIndexRangeScanOperator:
         """Test IndexRangeScanOperator execution."""
         # Create table
         catalog.create_table("employees", [
-            {"name": "id", "type": "int", "nullable": False},
-            {"name": "salary", "type": "int", "nullable": False},
-            {"name": "name", "type": "text", "nullable": False},
+            {"name": "id", "type": "INT", "nullable": False},
+            {"name": "salary", "type": "INT", "nullable": False},
+            {"name": "name", "type": "STRING", "nullable": False},
         ])
         
         # Insert data
-        table_manager.insert("employees", [1, 30000, "Alice"])
-        table_manager.insert("employees", [2, 45000, "Bob"])
-        table_manager.insert("employees", [3, 60000, "Charlie"])
-        table_manager.insert("employees", [4, 75000, "David"])
-        table_manager.insert("employees", [5, 90000, "Eve"])
+        table_manager.insert_row("employees", [1, 30000, "Alice"])
+        table_manager.insert_row("employees", [2, 45000, "Bob"])
+        table_manager.insert_row("employees", [3, 60000, "Charlie"])
+        table_manager.insert_row("employees", [4, 75000, "David"])
+        table_manager.insert_row("employees", [5, 90000, "Eve"])
         
         # Create index on salary
-        index_manager.create_index("employees", "salary", "salary_idx")
+        index_manager.create_index("salary_idx", "employees", "salary", table_manager)
         
         # Create operator for range [45000, 75000]
         operator = IndexRangeScanOperator(
@@ -284,8 +305,8 @@ class TestIndexRangeScanOperator:
             index_manager=index_manager,
             table_name="employees",
             index_name="salary_idx",
-            min_key=45000,
-            max_key=75000,
+            range_min=45000,
+            range_max=75000,
             min_inclusive=True,
             max_inclusive=True,
             column_names=["id", "salary", "name"]
@@ -312,7 +333,7 @@ class TestEndToEndRangeQueries:
     def test_e2e_greater_than_query(self, executor):
         """Test end-to-end execution of > query."""
         # Create table
-        executor.execute("CREATE TABLE students (id INT, score INT, name TEXT)")
+        executor.execute("CREATE TABLE students (id INT, score INT, name STRING)")
         
         # Insert data
         executor.execute("INSERT INTO students VALUES (1, 65, 'Alice')")
@@ -333,7 +354,7 @@ class TestEndToEndRangeQueries:
 
     def test_e2e_less_than_or_equal_query(self, executor):
         """Test end-to-end execution of <= query."""
-        executor.execute("CREATE TABLE items (id INT, stock INT, name TEXT)")
+        executor.execute("CREATE TABLE items (id INT, stock INT, name STRING)")
         executor.execute("INSERT INTO items VALUES (1, 5, 'Laptop')")
         executor.execute("INSERT INTO items VALUES (2, 15, 'Mouse')")
         executor.execute("INSERT INTO items VALUES (3, 25, 'Keyboard')")
@@ -348,7 +369,7 @@ class TestEndToEndRangeQueries:
 
     def test_e2e_greater_than_or_equal_query(self, executor):
         """Test end-to-end execution of >= query."""
-        executor.execute("CREATE TABLE orders (id INT, amount INT, status TEXT)")
+        executor.execute("CREATE TABLE orders (id INT, amount INT, status STRING)")
         executor.execute("INSERT INTO orders VALUES (1, 100, 'pending')")
         executor.execute("INSERT INTO orders VALUES (2, 200, 'shipped')")
         executor.execute("INSERT INTO orders VALUES (3, 300, 'delivered')")
@@ -364,7 +385,7 @@ class TestEndToEndRangeQueries:
 
     def test_e2e_range_with_strings(self, executor):
         """Test range queries work with string comparisons."""
-        executor.execute("CREATE TABLE books (id INT, title TEXT, rating INT)")
+        executor.execute("CREATE TABLE books (id INT, title STRING, rating INT)")
         executor.execute("INSERT INTO books VALUES (1, 'Alice', 4)")
         executor.execute("INSERT INTO books VALUES (2, 'Bob', 5)")
         executor.execute("INSERT INTO books VALUES (3, 'Charlie', 3)")

@@ -215,6 +215,32 @@ class TableManager:
         print(f"🔍 Retrieved {len(rows)} row(s) using index '{target_index.index_name}'")
         return rows
     
+    def fetch_row_by_location(self, table_name: str, page_id: int, row_id: int) -> Optional[List[Any]]:
+        """
+        Fetch a specific row by its physical location (page_id, row_id).
+        Used by index scan operators to retrieve rows efficiently.
+        
+        Args:
+            table_name: Name of the table
+            page_id: Page ID where row is stored
+            row_id: Row ID within the page
+            
+        Returns:
+            The row as a list of values, or None if not found
+        """
+        schema = self.catalog.get_table_schema(table_name)
+        if not schema:
+            return None
+        
+        page = self.page_manager.read_page(page_id)
+        if not page or row_id >= len(page.records):
+            return None
+        
+        try:
+            return self._deserialize_row(schema, page.records[row_id])
+        except Exception:
+            return None
+    
     def _filter_rows(self, rows: List[List[Any]], column_name: str, 
                     value: Any, schema: 'TableSchema') -> List[List[Any]]:
         """

@@ -261,24 +261,24 @@ class Catalog:
             index_manager: Optional IndexManager to build actual B-Tree
             
         Returns:
-            True if successful, False if duplicate or invalid
+            True if successful
+            
+        Raises:
+            ValueError: If table/column doesn't exist or index name is duplicate
         """
         # Check if index already exists
         if index_name in self.indexes:
-            print(f"❌ Index '{index_name}' already exists")
-            return False
+            raise ValueError(f"Index '{index_name}' already exists")
         
         # Check if table exists
         if table_name not in self.tables:
-            print(f"❌ Table '{table_name}' does not exist")
-            return False
+            raise ValueError(f"Table '{table_name}' does not exist")
         
         # Check if column exists in table
         table_schema = self.tables[table_name]
         column_exists = any(col['name'] == column_name for col in table_schema.columns)
         if not column_exists:
-            print(f"❌ Column '{column_name}' does not exist in table '{table_name}'")
-            return False
+            raise ValueError(f"Column '{column_name}' not found in table '{table_name}'")
         
         # Create index info (B-Tree will be built by IndexManager)
         index_info = IndexInfo(

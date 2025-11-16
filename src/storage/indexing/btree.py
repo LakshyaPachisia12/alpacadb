@@ -149,7 +149,6 @@ class BTree:
         Returns:
             Index where key should be inserted
         """
-<<<<<<< Updated upstream
         left, right = 0, len(keys)
         while left < right:
             mid = (left + right) // 2
@@ -160,148 +159,6 @@ class BTree:
         return left
 
     def search(self, key: Any) -> Optional[Tuple[int, int]]:
-=======
-        if self.root_page_id is None:
-            return []
-        return self._search_all_node(self._load_node(self.root_page_id), key)
-    
-    def range_scan(self, min_key: Optional[Any] = None, max_key: Optional[Any] = None,
-                   min_inclusive: bool = True, max_inclusive: bool = True) -> List[Tuple[int, int]]:
-        """
-        Perform a range scan on the B-Tree.
-        
-        Args:
-            min_key: Minimum key (None for no lower bound)
-            max_key: Maximum key (None for no upper bound)
-            min_inclusive: Include min_key in results (True for >=, False for >)
-            max_inclusive: Include max_key in results (True for <=, False for <)
-            
-        Returns:
-            List of (page_id, row_id) tuples for all keys in range
-            
-        Examples:
-            range_scan(10, 20) -> keys >= 10 AND <= 20
-            range_scan(10, 20, True, False) -> keys >= 10 AND < 20
-            range_scan(10, None) -> keys >= 10
-            range_scan(None, 20) -> keys <= 20
-        """
-        if self.root_page_id is None:
-            return []
-        
-        results = []
-        self._range_scan_node(self._load_node(self.root_page_id), min_key, max_key,
-                             min_inclusive, max_inclusive, results)
-        return results
-    
-    def _range_scan_node(self, node: BTreeNode, min_key: Optional[Any], max_key: Optional[Any],
-                        min_inclusive: bool, max_inclusive: bool, results: List) -> None:
-        """
-        Recursively scan nodes for keys in range.
-        
-        This performs an in-order traversal of the B-Tree, collecting all
-        keys that fall within the specified range.
-        """
-        if node.is_leaf:
-            # Leaf node: check each key
-            for i, key in enumerate(node.keys):
-                in_range = True
-                
-                # Check lower bound
-                if min_key is not None:
-                    if min_inclusive:
-                        in_range = in_range and (key >= min_key)
-                    else:
-                        in_range = in_range and (key > min_key)
-                
-                # Check upper bound
-                if max_key is not None:
-                    if max_inclusive:
-                        in_range = in_range and (key <= max_key)
-                    else:
-                        in_range = in_range and (key < max_key)
-                
-                if in_range:
-                    results.append(node.values[i])
-        else:
-            # Internal node: recursively visit children
-            for i in range(len(node.children)):
-                # Visit child
-                child = self._load_node(node.children[i])
-                self._range_scan_node(child, min_key, max_key, min_inclusive, max_inclusive, results)
-
-    def delete(self, key: Any, value: Optional[Tuple[int, int]] = None) -> bool:
-        """
-        Delete a key (or specific key-value pair) from the B-Tree.
-        
-        Args:
-            key: Key to delete
-            value: Optional specific value to delete (for duplicate keys)
-                   If None, deletes first matching key
-        
-        Returns:
-            True if deletion successful, False if key not found
-        
-        Note: This is a simplified implementation that rebuilds affected nodes.
-        For production use, consider implementing proper B-Tree deletion with
-        borrowing and merging.
-        """
-        if self.root_page_id is None:
-            return False
-        
-        root = self._load_node(self.root_page_id)
-        success = self._delete_from_node(root, key, value)
-        
-        # If root is now empty and has children, promote first child
-        if success and not root.is_leaf and len(root.keys) == 0:
-            if len(root.children) > 0:
-                self.root_page_id = root.children[0]
-        
-        return success
-    
-    def _delete_from_node(self, node: BTreeNode, key: Any, value: Optional[Tuple[int, int]]) -> bool:
-        """
-        Delete a key from a node (simplified implementation).
-        
-        This uses a simplified deletion strategy:
-        1. Find the key in the leaf
-        2. Remove it
-        3. Don't worry about underflow (acceptable for educational DBMS)
-        
-        For production, should implement:
-        - Borrowing from siblings when underflow occurs
-        - Merging nodes when borrowing isn't possible
-        - Redistributing keys properly
-        """
-        if node.is_leaf:
-            # Leaf node: try to find and remove the key
-            for i, k in enumerate(node.keys):
-                if k == key:
-                    # If specific value requested, check if it matches
-                    if value is not None and node.values[i] != value:
-                        continue
-                    
-                    # Remove key and value
-                    node.keys.pop(i)
-                    node.values.pop(i)
-                    self._save_node(node)
-                    return True
-            
-            return False  # Key not found
-        
-        else:
-            # Internal node: find appropriate child
-            i = 0
-            while i < len(node.keys) and key >= node.keys[i]:
-                i += 1
-            
-            if i < len(node.children):
-                child = self._load_node(node.children[i])
-                return self._delete_from_node(child, key, value)
-            
-            return False
-    
-    def _search_node(self, node: BTreeNode, key: Any) -> Optional[Tuple[int, int]]:
->>>>>>> Stashed changes
         """
         Search for a key in the B-Tree.
         O(log n) complexity.
@@ -374,6 +231,70 @@ class BTree:
             else:
                 # Key not at this position - search appropriate child
                 self._search_all_recursive(node.children[idx], key, results)
+
+    def range_scan(self, min_key: Optional[Any] = None, max_key: Optional[Any] = None,
+                   min_inclusive: bool = True, max_inclusive: bool = True) -> List[Tuple[int, int]]:
+        """
+        Perform a range scan on the B-Tree.
+        
+        Args:
+            min_key: Minimum key (None for no lower bound)
+            max_key: Maximum key (None for no upper bound)
+            min_inclusive: Include min_key in results (True for >=, False for >)
+            max_inclusive: Include max_key in results (True for <=, False for <)
+            
+        Returns:
+            List of (page_id, row_id) tuples for all keys in range
+            
+        Examples:
+            range_scan(10, 20) -> keys >= 10 AND <= 20
+            range_scan(10, 20, True, False) -> keys >= 10 AND < 20
+            range_scan(10, None) -> keys >= 10
+            range_scan(None, 20) -> keys <= 20
+        """
+        if self.root_page_id is None:
+            return []
+        
+        results = []
+        self._range_scan_node(self._read_node(self.root_page_id), min_key, max_key,
+                             min_inclusive, max_inclusive, results)
+        return results
+    
+    def _range_scan_node(self, node: BTreeNode, min_key: Optional[Any], max_key: Optional[Any],
+                        min_inclusive: bool, max_inclusive: bool, results: List) -> None:
+        """
+        Recursively scan nodes for keys in range.
+        
+        This performs an in-order traversal of the B-Tree, collecting all
+        keys that fall within the specified range.
+        """
+        if node.is_leaf:
+            # Leaf node: check each key
+            for i, key in enumerate(node.keys):
+                in_range = True
+                
+                # Check lower bound
+                if min_key is not None:
+                    if min_inclusive:
+                        in_range = in_range and (key >= min_key)
+                    else:
+                        in_range = in_range and (key > min_key)
+                
+                # Check upper bound
+                if max_key is not None:
+                    if max_inclusive:
+                        in_range = in_range and (key <= max_key)
+                    else:
+                        in_range = in_range and (key < max_key)
+                
+                if in_range:
+                    results.append(node.values[i])
+        else:
+            # Internal node: recursively visit children
+            for i in range(len(node.children)):
+                # Visit child
+                child = self._read_node(node.children[i])
+                self._range_scan_node(child, min_key, max_key, min_inclusive, max_inclusive, results)
 
     
     def _search_recursive(self, page_id: int, key: Any, depth: int = 0) -> Optional[Tuple[int, int]]:
@@ -521,19 +442,77 @@ class BTree:
         
         return new_node_id
 
-    def delete(self, key: Any) -> bool:
+    def delete(self, key: Any, value: Optional[Tuple[int, int]] = None) -> bool:
         """
-        Delete a key from the B-Tree.
+        Delete a key (or specific key-value pair) from the B-Tree.
         
         Args:
-            key: The key to delete
-            
+            key: Key to delete
+            value: Optional specific value to delete (for duplicate keys)
+                   If None, deletes first matching key
+        
         Returns:
-            True if key was found and deleted, False otherwise
+            True if deletion successful, False if key not found
+        
+        Note: This is a simplified implementation that rebuilds affected nodes.
+        For production use, consider implementing proper B-Tree deletion with
+        borrowing and merging.
         """
-        # Simplified delete: just mark as not implemented for now
-        # Full B-Tree deletion is complex with rebalancing
-        raise NotImplementedError("B-Tree deletion with rebalancing not yet implemented")
+        if self.root_page_id is None:
+            return False
+        
+        root = self._read_node(self.root_page_id)
+        success = self._delete_from_node(self.root_page_id, root, key, value)
+        
+        # If root is now empty and has children, promote first child
+        if success and not root.is_leaf and len(root.keys) == 0:
+            if len(root.children) > 0:
+                self.root_page_id = root.children[0]
+        
+        return success
+    
+    def _delete_from_node(self, page_id: int, node: BTreeNode, key: Any, value: Optional[Tuple[int, int]]) -> bool:
+        """
+        Delete a key from a node (simplified implementation).
+        
+        This uses a simplified deletion strategy:
+        1. Find the key in the leaf
+        2. Remove it
+        3. Don't worry about underflow (acceptable for educational DBMS)
+        
+        For production, should implement:
+        - Borrowing from siblings when underflow occurs
+        - Merging nodes when borrowing isn't possible
+        - Redistributing keys properly
+        """
+        if node.is_leaf:
+            # Leaf node: try to find and remove the key
+            for i, k in enumerate(node.keys):
+                if k == key:
+                    # If specific value requested, check if it matches
+                    if value is not None and node.values[i] != value:
+                        continue
+                    
+                    # Remove key and value
+                    node.keys.pop(i)
+                    node.values.pop(i)
+                    self._update_node(page_id, node)
+                    return True
+            
+            return False  # Key not found
+        
+        else:
+            # Internal node: find appropriate child
+            i = 0
+            while i < len(node.keys) and key >= node.keys[i]:
+                i += 1
+            
+            if i < len(node.children):
+                child_id = node.children[i]
+                child = self._read_node(child_id)
+                return self._delete_from_node(child_id, child, key, value)
+            
+            return False
     
     def size(self) -> int:
         """

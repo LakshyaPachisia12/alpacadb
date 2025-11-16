@@ -102,8 +102,8 @@ class QueryExecutor:
                     index_manager=self.index_manager,
                     table_name=node.table_name,
                     index_name=plan.index_name,
-                    min_key=plan.range_min,
-                    max_key=plan.range_max,
+                    range_min=plan.range_min,
+                    range_max=plan.range_max,
                     min_inclusive=plan.range_min_inclusive,
                     max_inclusive=plan.range_max_inclusive,
                     column_names=all_column_names,
@@ -340,7 +340,7 @@ class QueryExecutor:
         if not self.index_manager:
             raise ValueError("Index manager not available")
         
-        self.index_manager.create_index(node.index_name, node.table_name, node.column_name)
+        self.index_manager.create_index(node.index_name, node.table_name, node.column_name, self.table_manager)
         return [], None
 
     def _execute_drop_index(self, node: DropIndexNode) -> Tuple[List[List[Any]], None]:
