@@ -113,11 +113,10 @@ def test_parse_create_index():
     assert ast.column_name == "age"
 
 
-# TEMPORARILY DISABLED - Failing test
-# def test_parse_invalid_syntax():
-#     """Test error on invalid syntax."""
-#     with pytest.raises(ParseError):
-#         parse_query("SELCET * FROM users")  # Typo
+def test_parse_invalid_syntax():
+    """Test error on invalid syntax."""
+    with pytest.raises(ParseError):
+        parse_query("SELCET * FROM users")  # Typo
 
 
 def test_parse_missing_semicolon():
@@ -200,15 +199,14 @@ def test_parse_select_group_by_multiple():
     assert len(ast.aggregates) == 1
 
 
-# TEMPORARILY DISABLED - Failing test
-# def test_parse_select_having():
-#     """Test SELECT with HAVING clause."""
-#     query = "SELECT department, COUNT(*) FROM employees GROUP BY department HAVING COUNT(*) > 5"
-#     ast = parse_query(query)
-#     
-#     assert isinstance(ast, SelectNode)
-#     assert ast.group_by is not None
-#     assert ast.group_by.having_clause is not None
+def test_parse_select_having():
+    """Test SELECT with HAVING clause."""
+    query = "SELECT department, COUNT(*) FROM employees GROUP BY department HAVING COUNT(*) > 5"
+    ast = parse_query(query)
+    
+    assert isinstance(ast, SelectNode)
+    assert ast.group_by is not None
+    assert ast.group_by.having_clause is not None
 
 
 def test_parse_inner_join():
