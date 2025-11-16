@@ -120,6 +120,15 @@ class QueryOptimizer:
         
         # No usable index, use SeqScan
         return seqscan_plan
+                full_predicate=where_clause  # Still keep full predicate for additional filters
+            )
+        
+        # Rule 3: No usable index, fall back to SeqScan
+        return QueryPlan(
+            plan_type='SeqScan',
+            table_name=table_name,
+            full_predicate=where_clause
+        )
     
     def _find_index_opportunity(self, table_name: str, predicate: BinaryOp) -> Optional[tuple]:
         """

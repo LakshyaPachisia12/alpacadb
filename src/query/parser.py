@@ -5,7 +5,7 @@ Converts tokens into Abstract Syntax Tree (AST).
 Uses recursive descent parsing.
 """
 
-from typing import List, Optional
+from typing import List
 from .tokens import Token, TokenType
 from .ast_nodes import *
 

@@ -155,6 +155,49 @@ class QueryExecutor:
             self.last_plan = 'Join'
         else:
             self.last_plan = 'SeqScan'  # Default for non-optimized queries
+        # Get table schema
+        table_schema = self.catalog.get_table_schema(node.table_name)
+        if not table_schema:
+            raise ValueError(f"Table '{node.table_name}' does not exist")
+
+        # Extract column names from schema
+        all_column_names = [col['name'].lower() for col in table_schema.columns]
+
+        # Build operator tree from bottom up
+
+        # 1. Base Scan Operator (leaf node) - use optimizer if available
+        if self.optimizer:
+            # Ask optimizer for execution plan
+            plan = self.optimizer.optimize(node)
+            self.last_plan = plan.plan_type  # Store for testing/debugging
+            
+            if plan.plan_type == 'IndexScan':
+                # Use IndexScan for point lookup
+                scan = IndexScanOperator(
+                    table_manager=self.table_manager,
+                    index_manager=self.index_manager,
+                    table_name=node.table_name,
+                    index_name=plan.index_name,
+                    key=plan.search_key,
+                    column_names=all_column_names,
+                )
+            else:
+                # Fall back to sequential scan
+                scan = ScanOperator(
+                    table_manager=self.table_manager,
+                    table_name=node.table_name,
+                    column_names=all_column_names,
+                )
+        else:
+            # No optimizer - use sequential scan
+            self.last_plan = 'SeqScan'
+            scan = ScanOperator(
+                table_manager=self.table_manager,
+                table_name=node.table_name,
+                column_names=all_column_names,
+            )
+
+        current_operator = scan
 
         # 2. Filter Operator (WHERE clause)
         # Note: Even with IndexScan, we still apply the full predicate
@@ -426,6 +469,7 @@ class QueryExecutor:
                 "Index manager is not available",
                 hint="Dropping indexes requires the index manager to be initialized. This may be a configuration issue."
             )
+            raise ValueError("Index manager not available")
         
         self.index_manager.drop_index(node.index_name, node.table_name)
         return [], None

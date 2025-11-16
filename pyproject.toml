@@ -9,7 +9,10 @@ description = "AlpacaDB - A custom relational database management system built f
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "pytest>=8.4.2",
+    "bandit==1.7.5",
+    "pylint==3.0.3",
+    "pytest==7.4.3",
+    "pytest-cov==4.1.0",
 ]
 
 [project.scripts]
