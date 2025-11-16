@@ -9,6 +9,7 @@ from typing import Optional, Any
 from dataclasses import dataclass
 from ..query.ast_nodes import SelectNode, BinaryOp, ColumnRef, Literal
 from .cost_estimator import cost_seq_scan, cost_index_scan
+from ..errors import OptimizerError, TableNotFoundError
 
 
 @dataclass
@@ -53,20 +54,25 @@ class QueryOptimizer:
     - Join optimization
     """
     
-    def __init__(self, catalog, index_manager=None):
+    def __init__(self, catalog, index_manager=None, table_manager=None):
         """
         Initialize optimizer.
         
         Args:
             catalog: Database catalog for schema lookups
             index_manager: Optional IndexManager for index availability checks
+            table_manager: Optional TableManager for table size estimation
         """
         self.catalog = catalog
         self.index_manager = index_manager
+        self.table_manager = table_manager
     
     def optimize(self, select_node: SelectNode) -> QueryPlan:
         """
         Optimize a SELECT query and return an execution plan.
+        
+        Uses cost-based optimization: compares SeqScan vs IndexScan costs
+        and chooses the cheaper option.
         
         Args:
             select_node: Parsed SELECT AST node
@@ -246,4 +252,85 @@ class QueryOptimizer:
         if plan.full_predicate:
             lines.append(f"  Additional Filters: {plan.full_predicate}")
         
+        # Add cost estimation
+        cost = self.estimate_cost(plan)
+        lines.append(f"  Estimated Cost: {cost:.2f}")
+        
         return '\n'.join(lines)
+    
+    def estimate_cost(self, plan: QueryPlan) -> float:
+        """
+        Estimate the cost of executing a query plan.
+        
+        Cost model:
+        - SeqScan: cost = number of pages * page_read_cost
+        - IndexScan: cost = index_lookup_cost + result_fetch_cost
+        
+        Args:
+            plan: Query plan to estimate
+            
+        Returns:
+            Estimated cost (lower is better)
+        """
+        table_name = plan.table_name
+        
+        # Get table statistics
+        table_schema = self.catalog.get_table_schema(table_name)
+        if not table_schema:
+            return float('inf')  # Table doesn't exist
+        
+        # Estimate table size (number of rows)
+        # For now, we'll try to get actual count if possible
+        num_rows = self._estimate_table_size(table_name)
+        
+        # Cost constants
+        PAGE_READ_COST = 1.0  # Cost to read one page
+        INDEX_LOOKUP_COST = 2.0  # Cost for index traversal
+        INDEX_FETCH_COST = 0.5  # Cost per row fetched via index
+        
+        if plan.plan_type == 'SeqScan':
+            # Sequential scan: read all pages
+            # Estimate pages needed (assuming ~100 rows per page for simplicity)
+            estimated_pages = max(1, num_rows / 100)
+            cost = estimated_pages * PAGE_READ_COST
+            
+            # Add filter cost (0.1 per row checked)
+            if plan.full_predicate:
+                cost += num_rows * 0.1
+            
+        elif plan.plan_type == 'IndexScan':
+            # Index scan: lookup + fetch
+            cost = INDEX_LOOKUP_COST
+            
+            # Estimate selectivity (what fraction of rows match)
+            # For equality predicates, assume high selectivity (few matches)
+            # For now, estimate 1-5% of rows match (optimistic)
+            estimated_matches = max(1, num_rows * 0.01) if num_rows > 100 else 1
+            
+            # Fetch cost scales with number of matches
+            cost += estimated_matches * INDEX_FETCH_COST
+            
+            # Additional filter cost for remaining predicates
+            if plan.full_predicate:
+                cost += estimated_matches * 0.1
+        else:
+            cost = float('inf')
+        
+        return cost
+    
+    def _estimate_table_size(self, table_name: str) -> int:
+        """
+        Estimate the number of rows in a table.
+        
+        For now, we try to get actual count if table_manager is available.
+        Otherwise, estimate based on page count.
+        """
+        # Try to get actual row count if we have access to table_manager
+        if self.table_manager:
+            try:
+                rows = self.table_manager.select_all(table_name)
+                return len(rows)
+            except:
+                pass
+        # In a real implementation, we'd maintain statistics
+        return 100  # Default estimate

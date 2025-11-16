@@ -148,7 +148,7 @@ class TestE2EQueryWorkflows:
         rows_with_index, _ = self._execute_sql(
             executor, "SELECT * FROM products WHERE code = 'ABC123';"
         )
-        # Phase 2: For 2 rows with 2 distinct values (50% selectivity), cost-based optimizer
+        # For 2 rows with 2 distinct values (50% selectivity), cost-based optimizer
         # may choose SeqScan as it's cheaper. This is correct behavior.
         assert executor.last_plan in ('IndexScan', 'SeqScan')
         
@@ -472,6 +472,195 @@ class TestE2EErrorHandling:
         rows, _ = self._execute_sql(executor, "SELECT * FROM test WHERE id = 1;")
         assert len(rows) == 1
         assert executor.last_plan == 'SeqScan'
+    
+    def test_inner_join_basic(self, temp_db):
+        """Test basic INNER JOIN functionality."""
+        executor = temp_db['executor']
+        
+        # Create users table
+        self._execute_sql(executor, """
+        CREATE TABLE users (
+            id INT,
+            name STRING
+        );
+        """)
+        
+        # Create orders table
+        self._execute_sql(executor, """
+        CREATE TABLE orders (
+            id INT,
+            user_id INT,
+            product STRING
+        );
+        """)
+        
+        # Insert test data
+        self._execute_sql(executor, "INSERT INTO users VALUES (1, 'Alice');")
+        self._execute_sql(executor, "INSERT INTO users VALUES (2, 'Bob');")
+        self._execute_sql(executor, "INSERT INTO users VALUES (3, 'Charlie');")
+        
+        self._execute_sql(executor, "INSERT INTO orders VALUES (1, 1, 'Laptop');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (2, 1, 'Mouse');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (3, 2, 'Keyboard');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (4, 99, 'Monitor');")  # No matching user
+        
+        # Test INNER JOIN
+        rows, columns = self._execute_sql(executor, 
+            "SELECT users.name, orders.product FROM users INNER JOIN orders ON users.id = orders.user_id;")
+        
+        # Should have 3 rows (orders 1, 2, 3 match users 1, 1, 2)
+        assert len(rows) == 3
+        assert columns == ['name', 'product']
+        
+        # Check the results
+        results = [(row[0], row[1]) for row in rows]
+        expected = [
+            ('Alice', 'Laptop'),
+            ('Alice', 'Mouse'), 
+            ('Bob', 'Keyboard')
+        ]
+        assert sorted(results) == sorted(expected)
+        
+        assert executor.last_plan == 'Join'
+
+    def test_left_join_basic(self, temp_db):
+        """Test basic LEFT JOIN functionality."""
+        executor = temp_db['executor']
+
+        # Create tables
+        self._execute_sql(executor, """
+        CREATE TABLE users (
+            id INT,
+            name STRING
+        );
+        """)
+
+        self._execute_sql(executor, """
+        CREATE TABLE orders (
+            id INT,
+            user_id INT,
+            product STRING
+        );
+        """)
+        self._execute_sql(executor, "INSERT INTO users VALUES (1, 'Alice');")
+        self._execute_sql(executor, "INSERT INTO users VALUES (2, 'Bob');")
+        self._execute_sql(executor, "INSERT INTO users VALUES (3, 'Charlie');")
+
+        self._execute_sql(executor, "INSERT INTO orders VALUES (1, 1, 'Laptop');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (2, 1, 'Mouse');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (3, 2, 'Keyboard');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (4, 99, 'Monitor');")
+
+        rows, columns = self._execute_sql(executor,
+            "SELECT users.name, orders.product FROM users LEFT JOIN orders ON users.id = orders.user_id;")
+
+        # LEFT JOIN should include all users; Charlie has no matching order
+        assert len(rows) == 4
+        assert columns == ['name', 'product']
+
+    def test_right_join_basic(self, temp_db):
+        """Test basic RIGHT JOIN functionality."""
+        executor = temp_db['executor']
+
+        # Create tables
+        self._execute_sql(executor, """
+        CREATE TABLE users (
+            id INT,
+            name STRING
+        );
+        """)
+
+        self._execute_sql(executor, """
+        CREATE TABLE orders (
+            id INT,
+            user_id INT,
+            product STRING
+        );
+        """)
+        self._execute_sql(executor, "INSERT INTO users VALUES (1, 'Alice');")
+        self._execute_sql(executor, "INSERT INTO users VALUES (2, 'Bob');")
+        self._execute_sql(executor, "INSERT INTO users VALUES (3, 'Charlie');")
+
+        self._execute_sql(executor, "INSERT INTO orders VALUES (1, 1, 'Laptop');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (2, 1, 'Mouse');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (3, 2, 'Keyboard');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (4, 99, 'Monitor');")
+
+        rows, columns = self._execute_sql(executor,
+            "SELECT users.name, orders.product FROM users RIGHT JOIN orders ON users.id = orders.user_id;")
+
+        # RIGHT JOIN should include all orders; the Monitor row has no matching user
+        assert len(rows) == 4
+        assert columns == ['name', 'product']
+
+    def test_full_join_basic(self, temp_db):
+        """Test basic FULL JOIN functionality."""
+        executor = temp_db['executor']
+
+        # Create tables
+        self._execute_sql(executor, """
+        CREATE TABLE users (
+            id INT,
+            name STRING
+        );
+        """)
+
+        self._execute_sql(executor, """
+        CREATE TABLE orders (
+            id INT,
+            user_id INT,
+            product STRING
+        );
+        """)
+        self._execute_sql(executor, "INSERT INTO users VALUES (2, 'Bob');")
+        self._execute_sql(executor, "INSERT INTO users VALUES (3, 'Charlie');")
+
+        self._execute_sql(executor, "INSERT INTO orders VALUES (1, 1, 'Laptop');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (2, 1, 'Mouse');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (3, 2, 'Keyboard');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (4, 99, 'Monitor');")
+
+        rows, columns = self._execute_sql(executor,
+            "SELECT users.name, orders.product FROM users FULL JOIN orders ON users.id = orders.user_id;")
+
+        # Should include all matched pairs, plus unmatched rows from both sides
+        assert len(rows) == 5
+        assert columns == ['name', 'product']
+
+    def test_cross_join_basic(self, temp_db):
+        """Test CROSS JOIN (Cartesian product)."""
+        executor = temp_db['executor']
+
+        # Create tables
+        self._execute_sql(executor, """
+        CREATE TABLE users (
+            id INT,
+            name STRING
+        );
+        """)
+
+        self._execute_sql(executor, """
+        CREATE TABLE orders (
+            id INT,
+            user_id INT,
+            product STRING
+        );
+        """)
+        self._execute_sql(executor, "INSERT INTO users VALUES (1, 'Alice');")
+        self._execute_sql(executor, "INSERT INTO users VALUES (2, 'Bob');")
+        self._execute_sql(executor, "INSERT INTO users VALUES (3, 'Charlie');")
+
+        self._execute_sql(executor, "INSERT INTO orders VALUES (1, 1, 'Laptop');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (2, 1, 'Mouse');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (3, 2, 'Keyboard');")
+        self._execute_sql(executor, "INSERT INTO orders VALUES (4, 99, 'Monitor');")
+
+        rows, columns = self._execute_sql(executor,
+            "SELECT users.name, orders.product FROM users CROSS JOIN orders;")
+
+        # Cartesian product: 3 users * 4 orders
+        assert len(rows) == 12
+        assert columns == ['name', 'product']
 
 
 if __name__ == '__main__':

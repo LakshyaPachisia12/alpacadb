@@ -194,6 +194,7 @@ def test_parse_select_group_by_multiple():
     ast = parse_query(query)
     
     assert isinstance(ast, SelectNode)
+    assert ast.group_by is not None
     assert ast.group_by.columns == ["dept", "city"]
     assert len(ast.aggregates) == 1
 
@@ -206,3 +207,110 @@ def test_parse_select_having():
     assert isinstance(ast, SelectNode)
     assert ast.group_by is not None
     assert ast.group_by.having_clause is not None
+
+
+def test_parse_inner_join():
+    """Test parsing INNER JOIN."""
+    query = "SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id"
+    ast = parse_query(query)
+    
+    assert isinstance(ast, SelectNode)
+    assert len(ast.joins) == 1
+    join = ast.joins[0]
+    assert join.join_type == 'INNER'
+    assert join.table_name == 'orders'
+    assert join.on_condition is not None
+
+
+def test_parse_left_join():
+    """Test parsing LEFT JOIN."""
+    query = "SELECT * FROM users LEFT JOIN orders ON users.id = orders.user_id"
+    ast = parse_query(query)
+    
+    assert isinstance(ast, SelectNode)
+    assert len(ast.joins) == 1
+    join = ast.joins[0]
+    assert join.join_type == 'LEFT'
+    assert join.table_name == 'orders'
+
+
+def test_parse_right_join():
+    """Test parsing RIGHT JOIN."""
+    query = "SELECT * FROM users RIGHT JOIN orders ON users.id = orders.user_id"
+    ast = parse_query(query)
+    
+    assert isinstance(ast, SelectNode)
+    assert len(ast.joins) == 1
+    join = ast.joins[0]
+    assert join.join_type == 'RIGHT'
+    assert join.table_name == 'orders'
+
+
+def test_parse_full_join():
+    """Test parsing FULL JOIN."""
+    query = "SELECT * FROM users FULL JOIN orders ON users.id = orders.user_id"
+    ast = parse_query(query)
+    
+    assert isinstance(ast, SelectNode)
+    assert len(ast.joins) == 1
+    join = ast.joins[0]
+    assert join.join_type == 'FULL'
+    assert join.table_name == 'orders'
+
+
+def test_parse_cross_join():
+    """Test parsing CROSS JOIN."""
+    query = "SELECT * FROM users CROSS JOIN orders"
+    ast = parse_query(query)
+    
+    assert isinstance(ast, SelectNode)
+    assert len(ast.joins) == 1
+    join = ast.joins[0]
+    assert join.join_type == 'CROSS'
+    assert join.table_name == 'orders'
+    assert join.on_condition is None
+
+
+def test_parse_join_with_alias():
+    """Test parsing JOIN with table alias."""
+    query = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id"
+    ast = parse_query(query)
+    
+    assert isinstance(ast, SelectNode)
+    assert ast.alias == 'u'
+    assert len(ast.joins) == 1
+    join = ast.joins[0]
+    assert join.join_type == 'INNER'
+    assert join.table_name == 'orders'
+    assert join.alias == 'o'
+
+
+def test_parse_multiple_joins():
+    """Test parsing multiple JOINs."""
+    query = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id LEFT JOIN products p ON o.product_id = p.id"
+    ast = parse_query(query)
+    
+    assert isinstance(ast, SelectNode)
+    assert len(ast.joins) == 2
+    
+    join1 = ast.joins[0]
+    assert join1.join_type == 'INNER'
+    assert join1.table_name == 'orders'
+    assert join1.alias == 'o'
+    
+    join2 = ast.joins[1]
+    assert join2.join_type == 'LEFT'
+    assert join2.table_name == 'products'
+    assert join2.alias == 'p'
+
+
+def test_parse_join_with_outer():
+    """Test parsing JOIN with OUTER keyword."""
+    query = "SELECT * FROM users LEFT OUTER JOIN orders ON users.id = orders.user_id"
+    ast = parse_query(query)
+    
+    assert isinstance(ast, SelectNode)
+    assert len(ast.joins) == 1
+    join = ast.joins[0]
+    assert join.join_type == 'LEFT'
+    assert join.table_name == 'orders'

@@ -5,5 +5,19 @@ This package contains the core implementation of AlpacaDB,
 including storage engine, query processing, and transaction management.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "AlpacaDB Team"
+
+# Export error classes
+from .errors import (
+    AlpacaDBError,
+    SyntaxError,
+    ParserError,
+    LexerError,
+    OptimizerError,
+    ExecutionError,
+    TableNotFoundError,
+    ColumnNotFoundError,
+    IndexError,
+    IndexNotFoundError,
+)

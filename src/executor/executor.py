@@ -5,7 +5,7 @@ Converts AST nodes into physical operator trees and executes them.
 """
 
 from typing import List, Any, Optional, Tuple
-from .operators import ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator
+from .operators import PhysicalOperator, ScanOperator, FilterOperator, ProjectOperator, SortOperator, IndexScanOperator, AggregateOperator, NestedLoopJoinOperator
 from ..query.ast_nodes import (
     SelectNode,
     InsertNode,
@@ -14,6 +14,14 @@ from ..query.ast_nodes import (
     DropIndexNode,
     UpdateNode,
     DeleteNode,
+)
+from ..errors import (
+    ExecutionError,
+    TableNotFoundError,
+    ColumnNotFoundError,
+    InvalidSchemaError,
+    DuplicateTableError,
+    IndexNotFoundError,
 )
 from ..optimizer import QueryOptimizer
 
@@ -27,7 +35,7 @@ class QueryExecutor:
         self.table_manager = table_manager
         self.catalog = catalog
         self.index_manager = index_manager
-        self.optimizer = QueryOptimizer(catalog, index_manager) if index_manager else None
+        self.optimizer = QueryOptimizer(catalog, index_manager, table_manager) if index_manager else None
         self.last_plan = None  # For debugging/testing - stores last query plan type
 
     def execute(self, ast_node) -> Tuple[List[List[Any]], Optional[List[str]]]:
@@ -53,7 +61,73 @@ class QueryExecutor:
         elif isinstance(ast_node, DeleteNode):
             return self._execute_delete(ast_node)
         else:
-            raise ValueError(f"Unknown AST node type: {type(ast_node)}")
+            raise ExecutionError(
+                f"Unknown AST node type: {type(ast_node).__name__}",
+                hint="This query type is not supported. Supported types: SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, CREATE INDEX, DROP INDEX."
+            )
+
+    def _build_base_operator_tree(self, node: SelectNode) -> Tuple[PhysicalOperator, List[str]]:
+        """
+        Build the base operator tree for scans and joins.
+        
+        Returns:
+            (root_operator, all_column_names)
+        """
+        # Start with the main table
+        main_table_schema = self.catalog.get_table_schema(node.table_name)
+        if not main_table_schema:
+            raise TableNotFoundError(node.table_name)
+        
+        main_columns = [col['name'].lower() for col in main_table_schema.columns]
+        
+        # Create qualified column names for the main table
+        main_table_alias = node.alias or node.table_name
+        qualified_main_columns = [f"{main_table_alias}.{col}" for col in main_columns]
+        
+        # Create scan for main table
+        main_scan = ScanOperator(
+            table_manager=self.table_manager,
+            table_name=node.table_name,
+            column_names=main_columns,
+        )
+        
+        current_operator = main_scan
+        all_columns = qualified_main_columns.copy()
+        
+        # Apply joins sequentially (left-deep join tree)
+        for join_clause in node.joins:
+            # Get schema for joined table
+            join_table_schema = self.catalog.get_table_schema(join_clause.table_name)
+            if not join_table_schema:
+                raise TableNotFoundError(join_clause.table_name)
+            
+            join_columns = [col['name'].lower() for col in join_table_schema.columns]
+            
+            # Create qualified column names for the joined table
+            table_alias = join_clause.alias or join_clause.table_name
+            qualified_join_columns = [f"{table_alias}.{col}" for col in join_columns]
+            
+            # Create scan for joined table
+            join_scan = ScanOperator(
+                table_manager=self.table_manager,
+                table_name=join_clause.table_name,
+                column_names=join_columns,
+            )
+            
+            # Create join operator
+            current_operator = NestedLoopJoinOperator(
+                left_child=current_operator,
+                right_child=join_scan,
+                join_type=join_clause.join_type,
+                join_condition=join_clause.on_condition,
+                left_columns=all_columns,
+                right_columns=qualified_join_columns,
+            )
+            
+            # Update column list with qualified names
+            all_columns.extend(qualified_join_columns)
+        
+        return current_operator, all_columns
 
     def _execute_select(self, node: SelectNode) -> Tuple[List[List[Any]], List[str]]:
         """
@@ -68,10 +142,21 @@ class QueryExecutor:
                 ↓
             IndexScanOperator OR ScanOperator (FROM table - chosen by optimizer)
         """
+        # Handle EXPLAIN query
+        if hasattr(node, 'is_explain') and node.is_explain:
+            if self.optimizer:
+                plan = self.optimizer.optimize(node)
+                explanation = self.optimizer.explain(plan)
+                cost = self.optimizer.estimate_cost(plan)
+                # Return explanation as a single row with one column
+                return [[explanation + f"\n\n💰 Estimated Cost: {cost:.2f}"]], ['Query Plan']
+            else:
+                return [["Optimizer not available"]], ['Query Plan']
+        
         # Get table schema
         table_schema = self.catalog.get_table_schema(node.table_name)
         if not table_schema:
-            raise ValueError(f"Table '{node.table_name}' does not exist")
+            raise TableNotFoundError(node.table_name)
 
         # Extract column names from schema
         all_column_names = [col['name'].lower() for col in table_schema.columns]
@@ -191,10 +276,13 @@ class QueryExecutor:
                 else:
                     col_name = agg.column if agg.column else '*'
                     output_columns.append(f"{agg.func_name}({col_name})")
-        elif "*" in (node.columns or ["*"]):
-            output_columns = all_column_names
         else:
-            output_columns = [col.lower() for col in (node.columns or [])]
+            # For regular queries, use selected columns or all columns
+            if "*" in (node.columns or ["*"]):
+                output_columns = all_column_names
+            else:
+                # Map qualified names like 'users.name' to final output labels 'name'
+                output_columns = [col.lower().split('.')[-1] for col in (node.columns or [])]
 
         return results, output_columns
 
@@ -270,15 +358,21 @@ class QueryExecutor:
                 if filter_op._evaluate_predicate(row):
                     # Apply updates
                     for col_name, new_value in node.assignments:
-                        col_idx = all_column_names.index(col_name.lower())
-                        row[col_idx] = new_value
+                        try:
+                            col_idx = all_column_names.index(col_name.lower())
+                            row[col_idx] = new_value
+                        except ValueError:
+                            raise ColumnNotFoundError(col_name, node.table_name)
                     updated_count += 1
         else:
             # No WHERE clause - update all rows
             for row in all_rows:
                 for col_name, new_value in node.assignments:
-                    col_idx = all_column_names.index(col_name.lower())
-                    row[col_idx] = new_value
+                    try:
+                        col_idx = all_column_names.index(col_name.lower())
+                        row[col_idx] = new_value
+                    except ValueError:
+                        raise ColumnNotFoundError(col_name, node.table_name)
                 updated_count += 1
 
         # Clear table and re-insert (simple approach)
@@ -358,7 +452,10 @@ class QueryExecutor:
     def _execute_create_index(self, node: CreateIndexNode) -> Tuple[List[List[Any]], None]:
         """Execute CREATE INDEX statement."""
         if not self.index_manager:
-            raise ValueError("Index manager not available")
+            raise ExecutionError(
+                "Index manager is not available",
+                hint="Indexes require the index manager to be initialized. This may be a configuration issue."
+            )
         
         self.index_manager.create_index(node.index_name, node.table_name, node.column_name)
         return [], None
@@ -366,7 +463,10 @@ class QueryExecutor:
     def _execute_drop_index(self, node: DropIndexNode) -> Tuple[List[List[Any]], None]:
         """Execute DROP INDEX statement."""
         if not self.index_manager:
-            raise ValueError("Index manager not available")
+            raise ExecutionError(
+                "Index manager is not available",
+                hint="Dropping indexes requires the index manager to be initialized. This may be a configuration issue."
+            )
         
         self.index_manager.drop_index(node.index_name, node.table_name)
         return [], None
