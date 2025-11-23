@@ -41,6 +41,20 @@ Thumbs.db
 # Testing
 .pytest_cache/
 .coverage
+htmlcov/"venv/" 
 htmlcov/
 
+# Test/demo files in root (should be in tests/ directory)
+/test_performance_comparison.py
+/test_btree_depth.py
+/demo_new_features.py
+/measure_true_cost.py
+
+htmlcov/
+
+
+# Project specs
 specs/
+
+# Virtual environments
+v_alpaca/
