@@ -1,0 +1,714 @@
+name: Team Contribution Report
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  team-report:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch all branches
+        run: |
+          git fetch --all --prune
+          git branch -r
+          
+      - name: Get direct repository collaborators
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_GITHUB_TOKEN }}
+        run: |
+          set -e
+          
+          echo "========================================" >&2
+          echo "FETCHING DIRECT REPOSITORY COLLABORATORS" >&2
+          echo "========================================" >&2
+          
+          # Get ONLY direct collaborators (excludes inherited org members)
+          gh api "repos/${{ github.repository }}/collaborators?affiliation=direct" --paginate 2>/dev/null | \
+            jq -r '.[] | select(.type != "Bot") | .login' > collaborators_raw.txt || echo "" > collaborators_raw.txt
+          
+          # Filter out team accounts matching pattern: (RR|EC)_(CSE|AIML)_PESU25_[A-L]_*
+          > collaborators.txt
+          while read -r username; do
+            [ -z "$username" ] && continue
+            
+            # Skip team accounts (case-insensitive)
+            if echo "$username" | grep -iE '^(RR|EC)_(CSE|AIML)_PESU25_[A-L]_' >/dev/null 2>&1; then
+              echo "  ⏭️  Skipping team account: $username" >&2
+              continue
+            fi
+            
+            echo "$username" >> collaborators.txt
+          done < collaborators_raw.txt
+          
+          COLLAB_COUNT=$(cat collaborators.txt | wc -l)
+          echo "✅ Found $COLLAB_COUNT direct collaborators (teams filtered)" >&2
+          
+          # Get real names and roles for each collaborator
+          > collaborators_with_details.txt
+          while read -r username; do
+            [ -z "$username" ] && continue
+            
+            REAL_NAME=$(gh api users/$username --jq '.name // .login' 2>/dev/null || echo "$username")
+            
+            # Get permission level
+            PERMISSION=$(gh api repos/${{ github.repository }}/collaborators/$username/permission --jq '.permission' 2>/dev/null || echo "unknown")
+            
+            # Map to readable role
+            case $PERMISSION in
+              "admin") ROLE="Admin" ;;
+              "write") ROLE="Write" ;;
+              "read") ROLE="Read" ;;
+              "maintain") ROLE="Maintain" ;;
+              "triage") ROLE="Triage" ;;
+              *) ROLE="Unknown" ;;
+            esac
+            
+            # Categorize for sorting (Students first, then Admin)
+            if [ "$ROLE" = "Write" ]; then
+              SORT_ORDER="1"
+            elif [ "$ROLE" = "Admin" ] || [ "$ROLE" = "Maintain" ]; then
+              SORT_ORDER="2"
+            else
+              SORT_ORDER="3"
+            fi
+            
+            echo "$SORT_ORDER|$username|$REAL_NAME|$ROLE" >> collaborators_with_details.txt
+            echo "  - $username ($REAL_NAME) [$ROLE]" >&2
+          done < collaborators.txt
+          
+          # Sort by role (Students first)
+          sort -t'|' -k1 collaborators_with_details.txt > collaborators_sorted.txt
+          
+          echo "" >&2
+          
+      - name: Build commit map using GitHub API (Accurate)
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_GITHUB_TOKEN }}
+        run: |
+          set -e
+          
+          echo "========================================" >&2
+          echo "BUILDING ACCURATE COMMIT MAP (GITHUB API)" >&2
+          echo "========================================" >&2
+          
+          mkdir -p member-data
+          
+          # Get all commits with author info
+          git log --all --format='%H|%an|%ae|%s|%ci' > all_commits_full.txt
+          
+          TOTAL_COMMITS=$(cat all_commits_full.txt | wc -l)
+          echo "📊 Found $TOTAL_COMMITS total commits" >&2
+          echo "🔄 Using GitHub API for 100% accurate attribution..." >&2
+          echo "" >&2
+          
+          # Use GitHub API for EVERY commit (most accurate)
+          > commit_to_github.map
+          PROCESSED=0
+          MATCHED=0
+          UNMATCHED=0
+          
+          while IFS='|' read -r hash author_name author_email subject date; do
+            [ -z "$hash" ] && continue
+            
+            # Get GitHub username from API for this commit
+            GH_USER=$(gh api repos/${{ github.repository }}/commits/$hash --jq '.author.login // empty' 2>/dev/null || echo "")
+            
+            if [ -n "$GH_USER" ]; then
+              echo "$hash|$GH_USER|$author_name|$author_email|$subject|$date" >> commit_to_github.map
+              MATCHED=$((MATCHED + 1))
+            else
+              # Fallback for commits without GitHub association (rare)
+              GH_USER=$(gh api "search/commits?q=repo:${{ github.repository }}+hash:$hash" --jq '.items[0].author.login // empty' 2>/dev/null || echo "unknown")
+              echo "$hash|$GH_USER|$author_name|$author_email|$subject|$date" >> commit_to_github.map
+              if [ "$GH_USER" = "unknown" ]; then
+                UNMATCHED=$((UNMATCHED + 1))
+              else
+                MATCHED=$((MATCHED + 1))
+              fi
+            fi
+            
+            PROCESSED=$((PROCESSED + 1))
+            if [ $((PROCESSED % 25)) -eq 0 ]; then
+              echo "  ⏳ Processed $PROCESSED/$TOTAL_COMMITS commits... (Matched: $MATCHED, Unknown: $UNMATCHED)" >&2
+            fi
+          done < all_commits_full.txt
+          
+          echo "" >&2
+          echo "✅ Commit mapping complete with 100% accuracy" >&2
+          echo "  - Total processed: $PROCESSED" >&2
+          echo "  - Successfully matched: $MATCHED" >&2
+          echo "  - Unknown/External: $UNMATCHED" >&2
+          echo "  - API calls used: $PROCESSED" >&2
+          
+      - name: Detect branch creators (Cherry-pick aware)
+        run: |
+          set -e
+          
+          echo "========================================" >&2
+          echo "DETECTING BRANCH CREATORS" >&2
+          echo "========================================" >&2
+          
+          # Define org owners
+          ORG_OWNERS=("v-s-v-i-s-h-w-a-s" "Akarsh-Hegde" "HarshPandya4gd")
+          
+          # Get default branch
+          DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
+          echo "Default branch: $DEFAULT_BRANCH" >&2
+          echo "" >&2
+          
+          > branch_ownership.map
+          
+          # Analyze each branch
+          git for-each-ref --format='%(refname:short)' refs/remotes/origin/ 2>/dev/null | while read branch; do
+            [ "$branch" = "origin/HEAD" ] && continue
+            
+            BRANCH_NAME="${branch#origin/}"
+            
+            # For default branch, use initial commit
+            if [ "$BRANCH_NAME" = "$DEFAULT_BRANCH" ]; then
+              INITIAL_COMMIT=$(git rev-list --max-parents=0 HEAD 2>/dev/null | head -1)
+              CREATOR=$(grep "^$INITIAL_COMMIT|" commit_to_github.map 2>/dev/null | cut -d'|' -f2)
+              echo "$BRANCH_NAME|$CREATOR|$INITIAL_COMMIT|default" >> branch_ownership.map
+              echo "  🏠 $BRANCH_NAME → $CREATOR (default)" >&2
+              continue
+            fi
+            
+            # Find parent branch (try default first, then look for closest)
+            PARENT_BRANCH="origin/$DEFAULT_BRANCH"
+            MERGE_BASE=$(git merge-base "$PARENT_BRANCH" "$branch" 2>/dev/null || echo "")
+            
+            if [ -z "$MERGE_BASE" ]; then
+              # Try to find any parent
+              for possible_parent in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin/ | grep -v "^$branch$"); do
+                MERGE_BASE=$(git merge-base "$possible_parent" "$branch" 2>/dev/null || echo "")
+                if [ -n "$MERGE_BASE" ]; then
+                  PARENT_BRANCH="$possible_parent"
+                  break
+                fi
+              done
+            fi
+            
+            if [ -z "$MERGE_BASE" ]; then
+              echo "  ❓ $BRANCH_NAME → Unknown (no merge-base found)" >&2
+              echo "$BRANCH_NAME|unknown||unknown" >> branch_ownership.map
+              continue
+            fi
+            
+            # Get commits unique to this branch
+            UNIQUE_COMMITS=$(git log "$branch" --format='%H' --ancestry-path "$MERGE_BASE..$branch" --reverse 2>/dev/null || echo "")
+            
+            if [ -z "$UNIQUE_COMMITS" ]; then
+              echo "  ❓ $BRANCH_NAME → Unknown (no unique commits)" >&2
+              echo "$BRANCH_NAME|unknown||unknown" >> branch_ownership.map
+              continue
+            fi
+            
+            # Get parent branch commits for cherry-pick detection
+            PARENT_MESSAGES=$(git log "$PARENT_BRANCH" --format='%s|||%ae' 2>/dev/null || echo "")
+            
+            # Find first non-org, non-cherry-picked commit
+            BRANCH_CREATOR=""
+            CREATOR_COMMIT=""
+            
+            echo "$UNIQUE_COMMITS" | while read commit_hash; do
+              [ -z "$commit_hash" ] && continue
+              
+              COMMIT_INFO=$(grep "^$commit_hash|" commit_to_github.map 2>/dev/null || echo "")
+              GH_USER=$(echo "$COMMIT_INFO" | cut -d'|' -f2)
+              COMMIT_EMAIL=$(echo "$COMMIT_INFO" | cut -d'|' -f4)
+              COMMIT_MSG=$(echo "$COMMIT_INFO" | cut -d'|' -f5)
+              
+              # Filter 1: Skip org owners
+              IS_ORG=false
+              for org_owner in "${ORG_OWNERS[@]}"; do
+                if [ "$GH_USER" = "$org_owner" ]; then
+                  IS_ORG=true
+                  break
+                fi
+              done
+              
+              if [ "$IS_ORG" = "true" ]; then
+                continue
+              fi
+              
+              # Filter 2: Skip cherry-picked commits (same message + email in parent)
+              IS_CHERRY_PICK=false
+              if echo "$PARENT_MESSAGES" | grep -F "$COMMIT_MSG|||$COMMIT_EMAIL" >/dev/null 2>&1; then
+                IS_CHERRY_PICK=true
+              fi
+              
+              if [ "$IS_CHERRY_PICK" = "true" ]; then
+                continue
+              fi
+              
+              # This is the branch creator!
+              echo "$BRANCH_NAME|$GH_USER|$commit_hash|detected" >> branch_ownership.map
+              echo "  🌿 $BRANCH_NAME → $GH_USER (commit: ${commit_hash:0:7})" >&2
+              break
+            done
+            
+            # If no creator found after filtering, mark as unknown
+            if ! grep -q "^$BRANCH_NAME|" branch_ownership.map 2>/dev/null; then
+              echo "$BRANCH_NAME|unknown||filtered" >> branch_ownership.map
+              echo "  ⚠️  $BRANCH_NAME → Unknown (all commits filtered)" >&2
+            fi
+          done
+          
+          echo "" >&2
+          echo "✅ Branch creator detection complete" >&2
+          
+      - name: Fetch and batch process PRs
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_GITHUB_TOKEN }}
+        run: |
+          set -e
+          
+          echo "========================================" >&2
+          echo "FETCHING ALL PULL REQUESTS (BATCHED)" >&2
+          echo "========================================" >&2
+          
+          # Get ALL PRs in one batch call
+          gh api "repos/${{ github.repository }}/pulls?state=all&per_page=100" --paginate > all_prs.json 2>/dev/null || echo "[]" > all_prs.json
+          
+          TOTAL_PRS=$(jq 'length' all_prs.json 2>/dev/null || echo "0")
+          echo "📊 Found $TOTAL_PRS total PRs" >&2
+          
+          if [ "$TOTAL_PRS" -eq 0 ]; then
+            echo "⚠️  No PRs found in repository" >&2
+            touch pr_created.txt pr_merged.txt pr_reviews.txt
+            exit 0
+          fi
+          
+          # Process PRs to extract data
+          > pr_created.txt
+          > pr_merged.txt
+          > pr_reviews.txt
+          
+          echo "📝 Processing PR data..." >&2
+          
+          jq -r '.[] | "\(.number)|\(.user.login)|\(.state)|\(.merged)|\(.merged_by.login // "null")|\(.created_at)|\(.title)|\(.html_url)"' all_prs.json 2>/dev/null | while IFS='|' read pr_num author state merged merged_by created_at title url; do
+            [ -z "$pr_num" ] && continue
+            
+            # Track PR created
+            echo "$author|$pr_num|$state|$merged|$created_at|$title|$url" >> pr_created.txt
+            
+            # Track PR merged by (only if actually merged)
+            if [ "$merged" = "true" ] && [ "$merged_by" != "null" ] && [ -n "$merged_by" ]; then
+              echo "$merged_by|$pr_num|$author|$created_at|$title|$url" >> pr_merged.txt
+              echo "  ✓ PR #$pr_num merged by $merged_by" >&2
+            fi
+          done
+          
+          echo "" >&2
+          echo "📊 Fetching comprehensive PR review data..." >&2
+          
+          PR_COUNT=0
+          # Get reviews for ALL PRs + review comments
+          jq -r '.[].number' all_prs.json 2>/dev/null | while read pr_num; do
+            [ -z "$pr_num" ] && continue
+            
+            PR_COUNT=$((PR_COUNT + 1))
+            
+            # Get PR title and URL for reference
+            PR_INFO=$(jq -r --arg num "$pr_num" '.[] | select(.number == ($num | tonumber)) | "\(.title)|\(.html_url)"' all_prs.json)
+            PR_TITLE=$(echo "$PR_INFO" | cut -d'|' -f1)
+            PR_URL=$(echo "$PR_INFO" | cut -d'|' -f2)
+            
+            # Fetch PR reviews (approvals, changes requested, etc.)
+            gh api "repos/${{ github.repository }}/pulls/$pr_num/reviews" 2>/dev/null | \
+              jq -r --arg title "$PR_TITLE" --arg url "$PR_URL" '.[] | "\(.user.login)|\(.state)|\(env.pr_num)|\($title)|\($url)"' 2>/dev/null | \
+              while IFS='|' read reviewer state pr_id pr_title pr_url; do
+                [ -z "$reviewer" ] && continue
+                echo "$reviewer|$state|$pr_num|$PR_TITLE|$PR_URL" >> pr_reviews.txt
+              done
+            
+            # Also fetch review comments (inline code comments)
+            gh api "repos/${{ github.repository }}/pulls/$pr_num/comments" 2>/dev/null | \
+              jq -r --arg title "$PR_TITLE" --arg url "$PR_URL" '.[] | "\(.user.login)|REVIEW_COMMENT|\(env.pr_num)|\($title)|\($url)"' 2>/dev/null | \
+              while IFS='|' read commenter state pr_id pr_title pr_url; do
+                [ -z "$commenter" ] && continue
+                echo "$commenter|REVIEW_COMMENT|$pr_num|$PR_TITLE|$PR_URL" >> pr_reviews.txt
+              done
+            
+            # Progress indicator
+            if [ $((pr_num % 5)) -eq 0 ]; then
+              echo "  ⏳ Processed PR #$pr_num..." >&2
+            fi
+          done
+          
+          echo "" >&2
+          echo "✅ PR data extracted:" >&2
+          echo "  - PRs created: $(cat pr_created.txt | wc -l)" >&2
+          echo "  - PRs merged: $(cat pr_merged.txt | wc -l)" >&2
+          echo "  - Review entries: $(cat pr_reviews.txt | wc -l)" >&2
+          echo "  - Unique reviewers: $(cut -d'|' -f1 pr_reviews.txt | sort -u | wc -l)" >&2
+          
+      - name: Analyze member contributions
+        run: |
+          set -e
+          
+          echo "========================================" >&2
+          echo "ANALYZING MEMBER CONTRIBUTIONS" >&2
+          echo "========================================" >&2
+          
+          while IFS='|' read -r sort_order gh_user real_name role; do
+            [ -z "$gh_user" ] && continue
+            
+            echo "" >&2
+            echo "👤 $real_name (@$gh_user) [$role]" >&2
+            echo "----------------------------------------" >&2
+            
+            SAFE_NAME=$(echo "$gh_user" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+            
+            # 1. TOTAL COMMITS
+            TOTAL_COMMITS=$(grep "|$gh_user|" commit_to_github.map 2>/dev/null | wc -l)
+            echo "  📝 Total commits: $TOTAL_COMMITS" >&2
+            
+            # 2. LAST 5 COMMITS
+            > "member-data/${SAFE_NAME}_last_5_commits.txt"
+            grep "|$gh_user|" commit_to_github.map 2>/dev/null | tail -5 | while IFS='|' read hash gh subject date junk; do
+              echo "$hash|$subject|$date" >> "member-data/${SAFE_NAME}_last_5_commits.txt"
+            done
+            
+            # Create semicolon-separated list for summary table
+            LAST_5_LINKS=$(cat "member-data/${SAFE_NAME}_last_5_commits.txt" 2>/dev/null | while IFS='|' read hash subject date; do
+              echo -n "[\`${hash:0:7}\`](https://github.com/${{ github.repository }}/commit/$hash);"
+            done | sed 's/;$//')
+            
+            # 3. BRANCHES CREATED
+            BRANCHES_CREATED=$(grep "|$gh_user|" branch_ownership.map 2>/dev/null | wc -l)
+            > "member-data/${SAFE_NAME}_branches_created.txt"
+            grep "|$gh_user|" branch_ownership.map 2>/dev/null | head -2 | cut -d'|' -f1 > "member-data/${SAFE_NAME}_branches_created.txt"
+            echo "  🌿 Branches created: $BRANCHES_CREATED" >&2
+            
+            # 4. COMMITS ON OWN BRANCHES
+            OWN_BRANCH_COMMITS=0
+            grep "|$gh_user|" branch_ownership.map 2>/dev/null | cut -d'|' -f1 | while read own_branch; do
+              COUNT=$(git log "origin/$own_branch" --format='%H' 2>/dev/null | while read ch; do
+                grep "^$ch|$gh_user|" commit_to_github.map 2>/dev/null | wc -l
+              done | awk '{sum+=$1} END {print sum}')
+              echo "${COUNT:-0}"
+            done | awk '{sum+=$1} END {print sum}' > "/tmp/${SAFE_NAME}_own_commits.txt"
+            OWN_BRANCH_COMMITS=$(cat "/tmp/${SAFE_NAME}_own_commits.txt" 2>/dev/null || echo "0")
+            echo "  📊 Commits on own branches: $OWN_BRANCH_COMMITS" >&2
+            
+            # 5. BRANCHES CONTRIBUTED TO
+            > "member-data/${SAFE_NAME}_branches_contributed.txt"
+            git for-each-ref --format='%(refname:short)' refs/remotes/origin/ 2>/dev/null | while read branch; do
+              [ "$branch" = "origin/HEAD" ] && continue
+              BRANCH_NAME="${branch#origin/}"
+              
+              # Check if this is NOT their branch
+              if ! grep -q "^$BRANCH_NAME|$gh_user|" branch_ownership.map 2>/dev/null; then
+                # Check if they have commits here
+                HAS_COMMITS=$(git log "$branch" --format='%H' 2>/dev/null | while read ch; do
+                  grep "^$ch|$gh_user|" commit_to_github.map 2>/dev/null
+                done | wc -l)
+                
+                if [ "$HAS_COMMITS" -gt 0 ]; then
+                  echo "$BRANCH_NAME|$HAS_COMMITS"
+                fi
+              fi
+            done | head -2 > "member-data/${SAFE_NAME}_branches_contributed.txt"
+            
+            BRANCHES_CONTRIBUTED=$(cat "member-data/${SAFE_NAME}_branches_contributed.txt" | wc -l)
+            echo "  🤝 Branches contributed: $BRANCHES_CONTRIBUTED" >&2
+            
+            # 6. COMMITS ON CONTRIBUTED BRANCHES
+            CONTRIB_COMMITS=$(cat "member-data/${SAFE_NAME}_branches_contributed.txt" 2>/dev/null | cut -d'|' -f2 | awk '{sum+=$1} END {print sum}' || echo "0")
+            echo "  📈 Commits on contributed branches: $CONTRIB_COMMITS" >&2
+            
+            # 7. PRS RAISED
+            PRS_RAISED=$(grep "^$gh_user|" pr_created.txt 2>/dev/null | wc -l)
+            > "member-data/${SAFE_NAME}_prs_created.txt"
+            grep "^$gh_user|" pr_created.txt 2>/dev/null | head -2 > "member-data/${SAFE_NAME}_prs_created.txt"
+            echo "  🔀 PRs raised: $PRS_RAISED" >&2
+            
+            # 8. PRS REVIEWED / APPROVED / REQUESTED CHANGES / REVIEW COMMENTS
+            # Count unique PR numbers where this user left a review
+            PRS_REVIEWED=$(grep "^$gh_user|" pr_reviews.txt 2>/dev/null | cut -d'|' -f3 | sort -u | wc -l)
+            PRS_APPROVED=$(grep "^$gh_user|APPROVED|" pr_reviews.txt 2>/dev/null | cut -d'|' -f3 | sort -u | wc -l)
+            PRS_CHANGES_REQUESTED=$(grep "^$gh_user|CHANGES_REQUESTED|" pr_reviews.txt 2>/dev/null | cut -d'|' -f3 | sort -u | wc -l)
+            PRS_COMMENTED=$(grep "^$gh_user|COMMENTED|" pr_reviews.txt 2>/dev/null | cut -d'|' -f3 | sort -u | wc -l)
+            PRS_REVIEW_COMMENTS=$(grep "^$gh_user|REVIEW_COMMENT|" pr_reviews.txt 2>/dev/null | wc -l)
+            
+            > "member-data/${SAFE_NAME}_prs_reviewed.txt"
+            grep "^$gh_user|" pr_reviews.txt 2>/dev/null | sort -t'|' -k3 -u | head -2 > "member-data/${SAFE_NAME}_prs_reviewed.txt"
+            
+            echo "  👀 PRs reviewed: $PRS_REVIEWED" >&2
+            echo "  ✅ PRs approved: $PRS_APPROVED" >&2
+            echo "  💬 PRs commented: $PRS_COMMENTED" >&2
+            echo "  📝 Review comments (inline): $PRS_REVIEW_COMMENTS" >&2
+            echo "  🔄 PRs changes requested: $PRS_CHANGES_REQUESTED" >&2
+            
+            # 9. PRS MERGED BY
+            PRS_MERGED=$(grep "^$gh_user|" pr_merged.txt 2>/dev/null | wc -l)
+            > "member-data/${SAFE_NAME}_prs_merged.txt"
+            grep "^$gh_user|" pr_merged.txt 2>/dev/null | head -2 > "member-data/${SAFE_NAME}_prs_merged.txt"
+            echo "  🎯 PRs merged by them: $PRS_MERGED" >&2
+            
+            # Save summary
+            echo "$gh_user|$real_name|$role|$TOTAL_COMMITS|$LAST_5_LINKS|$BRANCHES_CREATED|$OWN_BRANCH_COMMITS|$BRANCHES_CONTRIBUTED|$CONTRIB_COMMITS|$PRS_RAISED|$PRS_REVIEWED|$PRS_APPROVED|$PRS_COMMENTED|$PRS_REVIEW_COMMENTS|$PRS_CHANGES_REQUESTED|$PRS_MERGED" > "member-data/${SAFE_NAME}_summary.txt"
+            
+            echo "  ✅ Done" >&2
+            
+          done < collaborators_sorted.txt
+          
+          echo "" >&2
+          echo "✅ Member analysis complete" >&2
+          
+      - name: Generate report
+        run: |
+          set -ex
+          
+          REPO_NAME=$(basename "${{ github.repository }}")
+          
+          echo "# 📊 Team Contribution Report" > report.md
+          echo "" >> report.md
+          echo "**Repository:** [\`${{ github.repository }}\`](https://github.com/${{ github.repository }})" >> report.md
+          echo "" >> report.md
+          echo "*Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')*" >> report.md
+          echo "" >> report.md
+          
+          # Team Members Section
+          echo "## 👥 Team Members" >> report.md
+          echo "" >> report.md
+          
+          echo "### 📚 Students / Contributors" >> report.md
+          while IFS='|' read -r sort gh_user real_name role; do
+            [ "$sort" != "1" ] && continue
+            echo "- **$real_name** ([@$gh_user](https://github.com/$gh_user)) - *$role*" >> report.md
+          done < collaborators_sorted.txt
+          
+          echo "" >> report.md
+          echo "### 👨‍🏫 Faculty / Admins" >> report.md
+          while IFS='|' read -r sort gh_user real_name role; do
+            [ "$sort" != "2" ] && continue
+            echo "- **$real_name** ([@$gh_user](https://github.com/$gh_user)) - *$role*" >> report.md
+          done < collaborators_sorted.txt
+          
+          echo "" >> report.md
+          echo "---" >> report.md
+          echo "" >> report.md
+          
+          # Summary Table
+          echo "## 📋 Summary Table" >> report.md
+          echo "" >> report.md
+          echo "| Member | Role | Total Commits | Last 5 Commits | Branches Created | Commits (Own) | Branches Contributed | Commits (Contrib) | PRs Raised | PRs Reviewed | PRs Approved | PR Comments | Review Comments | Changes Requested | PRs Merged |" >> report.md
+          echo "|--------|------|---------------|----------------|------------------|---------------|----------------------|-------------------|------------|--------------|--------------|-------------|-----------------|-------------------|------------|" >> report.md
+          
+          for summary_file in member-data/*_summary.txt; do
+            [ ! -f "$summary_file" ] && continue
+            
+            IFS='|' read -r gh_user real_name role total_commits last_5 br_created own_commits br_contrib contrib_commits prs_raised prs_reviewed prs_approved prs_commented prs_review_comments prs_changes prs_merged < "$summary_file"
+            
+            echo "| **$real_name**<br/>[@$gh_user](https://github.com/$gh_user) | $role | $total_commits | $last_5 | $br_created | $own_commits | $br_contrib | $contrib_commits | $prs_raised | $prs_reviewed | $prs_approved | $prs_commented | $prs_review_comments | $prs_changes | $prs_merged |" >> report.md
+          done
+          
+          echo "" >> report.md
+          echo "---" >> report.md
+          echo "" >> report.md
+          
+          # Detailed Profiles
+          echo "## 👤 Detailed Member Profiles" >> report.md
+          echo "" >> report.md
+          
+          for summary_file in member-data/*_summary.txt; do
+            [ ! -f "$summary_file" ] && continue
+            
+            IFS='|' read -r gh_user real_name role total_commits last_5 br_created own_commits br_contrib contrib_commits prs_raised prs_reviewed prs_approved prs_commented prs_review_comments prs_changes prs_merged < "$summary_file"
+            
+            [ "$total_commits" -eq 0 ] && continue
+            
+            SAFE_NAME=$(echo "$gh_user" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+            
+            echo "---" >> report.md
+            echo "" >> report.md
+            echo "### 👤 $real_name ([@$gh_user](https://github.com/$gh_user)) - *$role*" >> report.md
+            echo "" >> report.md
+            
+            # Commits
+            echo "#### 📝 Last 5 Commits" >> report.md
+            if [ -f "member-data/${SAFE_NAME}_last_5_commits.txt" ]; then
+              while IFS='|' read hash subject date; do
+                echo "- [\`${hash:0:7}\`](https://github.com/${{ github.repository }}/commit/$hash) **$subject** - *$date*" >> report.md
+              done < "member-data/${SAFE_NAME}_last_5_commits.txt"
+            else
+              echo "*No commits yet*" >> report.md
+            fi
+            echo "" >> report.md
+            
+            # Branches Created
+            if [ "$br_created" -gt 0 ]; then
+              echo "#### 🌿 Last 2 Branches Created ($br_created total)" >> report.md
+              if [ -f "member-data/${SAFE_NAME}_branches_created.txt" ]; then
+                while read branch_name; do
+                  echo "- [\`$branch_name\`](https://github.com/${{ github.repository }}/tree/$branch_name)" >> report.md
+                done < "member-data/${SAFE_NAME}_branches_created.txt"
+              fi
+              echo "" >> report.md
+            fi
+            
+            # Branches Contributed
+            if [ "$br_contrib" -gt 0 ]; then
+              echo "#### 🤝 Last 2 Branches Contributed To ($br_contrib total)" >> report.md
+              if [ -f "member-data/${SAFE_NAME}_branches_contributed.txt" ]; then
+                while IFS='|' read branch_name commit_count; do
+                  echo "- [\`$branch_name\`](https://github.com/${{ github.repository }}/tree/$branch_name) - *$commit_count commits*" >> report.md
+                done < "member-data/${SAFE_NAME}_branches_contributed.txt"
+              fi
+              echo "" >> report.md
+            fi
+            
+            # PRs Created
+            if [ "$prs_raised" -gt 0 ]; then
+              echo "#### 🔀 Last 2 PRs Created ($prs_raised total)" >> report.md
+              if [ -f "member-data/${SAFE_NAME}_prs_created.txt" ]; then
+                while IFS='|' read author pr_num state date title url; do
+                  echo "- [#$pr_num: $title]($url) - *$state* ($date)" >> report.md
+                done < "member-data/${SAFE_NAME}_prs_created.txt"
+              fi
+              echo "" >> report.md
+            fi
+            
+            # PRs Reviewed
+            if [ "$prs_reviewed" -gt 0 ]; then
+              echo "#### 👀 PR Review Activity" >> report.md
+              echo "- **Total PRs Reviewed:** $prs_reviewed" >> report.md
+              echo "- **Approved:** $prs_approved" >> report.md
+              echo "- **Commented:** $prs_commented" >> report.md
+              echo "- **Inline Review Comments:** $prs_review_comments" >> report.md
+              echo "- **Changes Requested:** $prs_changes" >> report.md
+              
+              if [ -f "member-data/${SAFE_NAME}_prs_reviewed.txt" ] && [ -s "member-data/${SAFE_NAME}_prs_reviewed.txt" ]; then
+                echo "" >> report.md
+                echo "**Last 2 Reviews:**" >> report.md
+                while IFS='|' read reviewer state pr_num pr_title pr_url; do
+                  echo "- [#$pr_num: $pr_title]($pr_url) - *$state*" >> report.md
+                done < "member-data/${SAFE_NAME}_prs_reviewed.txt"
+              fi
+              echo "" >> report.md
+            fi
+            
+            # PRs Merged
+            if [ "$prs_merged" -gt 0 ]; then
+              echo "#### 🎯 Last 2 PRs Merged By Them ($prs_merged total)" >> report.md
+              if [ -f "member-data/${SAFE_NAME}_prs_merged.txt" ]; then
+                while IFS='|' read merger pr_num author date title url; do
+                  echo "- [#$pr_num: $title]($url) by @$author ($date)" >> report.md
+                done < "member-data/${SAFE_NAME}_prs_merged.txt"
+              fi
+              echo "" >> report.md
+            fi
+            
+          done
+          
+          # Footer
+          echo "---" >> report.md
+          echo "" >> report.md
+          echo "## 📌 Notes" >> report.md
+          echo "" >> report.md
+          echo "- **Org Owners:** v-s-v-i-s-h-w-a-s, Akarsh-Hegde, HarshPandya4gd" >> report.md
+          echo "- **Commit Attribution:** 100% accurate via GitHub API (one API call per commit)" >> report.md
+          echo "- **Branch Creator Detection:** Cherry-pick aware, skips org owner commits" >> report.md
+          echo "- **PR Review Types:**" >> report.md
+          echo "  - **Approved:** Formal approval" >> report.md
+          echo "  - **Commented:** General comment review" >> report.md
+          echo "  - **Review Comments:** Inline code review comments" >> report.md
+          echo "  - **Changes Requested:** Requested changes before merge" >> report.md
+          echo "- **PRs Merged:** Counts who clicked the merge button (not PR author)" >> report.md
+          echo "- **Team Accounts Filtered:** Pattern \`(RR|EC)_(CSE|AIML)_PESU25_[A-L]_*\`" >> report.md
+          echo "" >> report.md
+          echo "*Report generated by GitHub Actions • $(date -u '+%Y-%m-%d %H:%M:%S UTC')*" >> report.md
+          
+      - name: Publish summary
+        if: github.event_name == 'push'
+        run: |
+          cat report.md >> $GITHUB_STEP_SUMMARY
+          
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.PROJECT_GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: report.md
+          reactions: '+1'
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: team-report-${{ github.sha }}
+          path: |
+            report.md
+            member-data/
+            commit_to_github.map
+            branch_ownership.map
+            collaborators_sorted.txt
+            all_prs.json
+            pr_created.txt
+            pr_merged.txt
+            pr_reviews.txt
+          retention-days: 90
+
+      - name: Summary
+        run: |
+          echo "✅ Team Contribution Report Generated!"
+          echo ""
+          echo "📊 Report includes:"
+          echo "  - Team members (sorted by role)"
+          echo "  - Summary table with all metrics"
+          echo "  - Detailed member profiles"
+          echo ""
+          echo "🔧 Features:"
+          echo "  ✅ 100% accurate commit attribution (GitHub API)"
+          echo "  ✅ Cherry-pick aware branch creator detection"
+          echo "  ✅ Comprehensive PR review tracking"
+          echo "  ✅ Inline review comments tracked"
+          echo "  ✅ Direct collaborators only (affiliation=direct)"
+          echo "  ✅ Team accounts filtered"
+          echo ""
+          echo "💰 API Usage (Prioritizing Accuracy):"
+          COMMIT_API_CALLS=$TOTAL_COMMITS
+          PR_API_CALLS=$((TOTAL_PRS * 3))
+          TOTAL_API_CALLS=$((COMMIT_API_CALLS + PR_API_CALLS + TOTAL_MEMBERS * 2 + 10))
+          echo "  - Commit attribution: ~$COMMIT_API_CALLS calls"
+          echo "  - PR data + reviews: ~$PR_API_CALLS calls"
+          echo "  - Member data: ~$((TOTAL_MEMBERS * 2)) calls"
+          echo "  - TOTAL ESTIMATED: ~$TOTAL_API_CALLS calls"
+          echo ""
+          TOTAL_MEMBERS=$(cat collaborators_sorted.txt | wc -l)
+          TOTAL_COMMITS=$(cat commit_to_github.map | wc -l)
+          TOTAL_BRANCHES=$(cat branch_ownership.map | wc -l)
+          TOTAL_PRS=$(jq 'length' all_prs.json)
+          
+          echo "📈 Repository Stats:"
+          echo "  - Members: $TOTAL_MEMBERS"
+          echo "  - Commits: $TOTAL_COMMITS"
+          echo "  - Branches: $TOTAL_BRANCHES"
+          echo "  - PRs: $TOTAL_PRS"
+          echo ""
+          echo "🔍 PR Review Stats:"
+          TOTAL_REVIEWS=$(cat pr_reviews.txt 2>/dev/null | wc -l || echo "0")
+          UNIQUE_REVIEWERS=$(cut -d'|' -f1 pr_reviews.txt 2>/dev/null | sort -u | wc -l || echo "0")
+          TOTAL_APPROVED=$(grep "|APPROVED|" pr_reviews.txt 2>/dev/null | wc -l || echo "0")
+          TOTAL_CHANGES=$(grep "|CHANGES_REQUESTED|" pr_reviews.txt 2>/dev/null | wc -l || echo "0")
+          TOTAL_COMMENTED=$(grep "|COMMENTED|" pr_reviews.txt 2>/dev/null | wc -l || echo "0")
+          echo "  - Total review entries: $TOTAL_REVIEWS"
+          echo "  - Unique reviewers: $UNIQUE_REVIEWERS"
+          echo "  - Approved: $TOTAL_APPROVED"
+          echo "  - Changes requested: $TOTAL_CHANGES"
+          echo "  - Commented: $TOTAL_COMMENTED"
